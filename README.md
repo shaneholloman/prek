@@ -58,7 +58,7 @@ On Linux and macOS:
 
 <!-- linux-standalone-install:start -->
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.2.27/prek-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.2.28/prek-installer.sh | sh
 ```
 <!-- linux-standalone-install:end -->
 
@@ -66,7 +66,7 @@ On Windows:
 
 <!-- windows-standalone-install:start -->
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.2.27/prek-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.2.28/prek-installer.ps1 | iex"
 ```
 <!-- windows-standalone-install:end -->
 
@@ -320,6 +320,7 @@ prek is pretty new, but it is already being used or recommend by some projects a
 - [fastapi/asyncer](https://github.com/fastapi/asyncer/pull/437)
 - [astral-sh/ruff](https://github.com/astral-sh/ruff/pull/22505)
 - [astral-sh/ty](https://github.com/astral-sh/ty/pull/2469)
+- [home-assistant/core](https://github.com/home-assistant/core/pull/160427)
 - [DetachHead/basedpyright](https://github.com/DetachHead/basedpyright/pull/1413)
 - [OpenLineage/OpenLineage](https://github.com/OpenLineage/OpenLineage/pull/3965)
 - [authlib/authlib](https://github.com/authlib/authlib/pull/804)
