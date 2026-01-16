@@ -13,7 +13,7 @@ In addition to compatibility, `prek` adds a few extra keys (documented here) for
 By default, `prek` looks for a configuration file starting from your current working directory and moving upward.
 It stops when it finds a config file, or when it hits the git repository boundary.
 
-If you run without `--config`, `prek` then enables **workspace mode**:
+If you run **without** `--config`, `prek` then enables **workspace mode**:
 
 - The first config found while traversing upward becomes the workspace root.
 - From that root, `prek` searches for additional config files in subdirectories (nested projects).
@@ -58,6 +58,38 @@ repos:
         entry: python3 -m ruff check
         files: '\\.py$'
 ```
+
+### Scope (per-project)
+
+Each `.pre-commit-config.yaml` / `.pre-commit-config.yml` file is scoped to the **project directory it lives in**.
+
+In workspace mode, `prek` treats every discovered configuration file as a **distinct project**:
+
+- A project’s config only controls hook selection and filtering (for example `files` / `exclude`) for that project.
+- A project may contain nested subprojects (subdirectories with their own config). Those subprojects run using *their own* configs.
+
+Practical implication: filters in the parent project do not “turn off” a subproject.
+
+Example layout (monorepo with a nested project):
+
+- `foo/.pre-commit-config.yaml` (project `foo`)
+- `foo/bar/.pre-commit-config.yaml` (project `foo/bar`, nested subproject)
+
+If project `foo` config contains an `exclude` that matches `bar/**`, then hooks for project `foo` will not run on files under `foo/bar`:
+
+```yaml
+# foo/.pre-commit-config.yaml
+exclude:
+  glob: bar/**
+```
+
+But if `foo/bar` is itself a project (has its own config), files under `foo/bar` are still eligible for hooks when running **in the context of project `foo/bar`**.
+
+!!! note "Excluding a nested project"
+
+    If `foo/bar/.pre-commit-config.yaml` exists but you *don’t* want it to be recognized as a project in workspace mode, exclude it from discovery using [`.prekignore`](workspace.md#discovery).
+
+    Like `.gitignore`, `.prekignore` files can be placed anywhere in the workspace and apply to their directory and all subdirectories.
 
 ### Validation
 
@@ -105,23 +137,78 @@ Each entry is one of:
 
 See [Repo entries](#repo-entries).
 
+<a id="top-level-files"></a>
+
 #### `files`
 
 Global *include* regex applied before hook-level filtering.
 
-- Type: regex string
+- Type: regex string (default, pre-commit compatible) **or** a prek-only glob pattern mapping
 - Default: no global include filter
 
 This is usually used to narrow down the universe of files in large repositories.
+
+!!! note "prek-only globs"
+
+    In addition to regex strings, `prek` supports glob patterns via:
+
+    - `files: { glob: "..." }` (single glob)
+    - `files: { glob: ["...", "..."] }` (glob list)
+
+    This is a `prek` extension. Upstream `pre-commit` expects regex strings here.
+
+    For more information on the glob syntax, refer to the [globset documentation](https://docs.rs/globset/latest/globset/#syntax).
+
+Examples:
+
+```yaml
+# Regex (portable to pre-commit)
+files: '\\.rs$'
+
+# Glob (prek-only)
+files:
+  glob: src/**/*.rs
+
+# Glob list (prek-only; matches if any glob matches)
+files:
+  glob:
+    - src/**/*.rs
+    - crates/**/src/**/*.rs
+```
+
+<a id="top-level-exclude"></a>
 
 #### `exclude`
 
 Global *exclude* regex applied before hook-level filtering.
 
-- Type: regex string
+- Type: regex string (default, pre-commit compatible) **or** a prek-only glob pattern mapping
 - Default: no global exclude filter
 
 `exclude` is useful for generated folders, vendored code, or build outputs.
+
+!!! note "prek-only globs"
+
+    Like `files`, `exclude` supports `glob` (single glob or glob list) as a `prek` extension.
+
+    For more information on the glob syntax, refer to the [globset documentation](https://docs.rs/globset/latest/globset/#syntax).
+
+Examples:
+
+```yaml
+# Regex (portable to pre-commit)
+exclude: '^target/'
+
+# Glob (prek-only)
+exclude:
+  glob: target/**
+
+# Glob list (prek-only)
+exclude:
+  glob:
+    - target/**
+    - dist/**
+```
 
 #### `fail_fast`
 
@@ -199,7 +286,7 @@ Allowed values:
 
 !!! note "prek-only"
 
-  This key is a `prek` extension. Upstream `pre-commit` uses `minimum_pre_commit_version`, which `prek` intentionally ignores.
+     This key is a `prek` extension. Upstream `pre-commit` uses `minimum_pre_commit_version`, which `prek` intentionally ignores.
 
 Require a minimum `prek` version for this config.
 
@@ -220,7 +307,7 @@ minimum_prek_version: '0.2.0'
 
 !!! note "prek-only"
 
-  `orphan` is a `prek` workspace-mode feature and is not recognized by upstream `pre-commit`.
+    `orphan` is a `prek` workspace-mode feature and is not recognized by upstream `pre-commit`.
 
 Workspace-mode setting to isolate a nested project from parent configs.
 
@@ -348,7 +435,7 @@ repos:
 
 !!! note "prek-only"
 
-  `repo: builtin` is specific to `prek` and is not compatible with upstream `pre-commit`.
+    `repo: builtin` is specific to `prek` and is not compatible with upstream `pre-commit`.
 
 Use `prek`’s built-in fast hooks (offline, zero setup).
 
@@ -443,10 +530,10 @@ Common values include `system`, `python`, `node`, `rust`, `golang`, `ruby`, and 
 
 !!! note "Legacy aliases"
 
-  Some older `pre-commit` language names map to modern ones:
+    Some older `pre-commit` language names map to modern ones:
 
-  - `unsupported` is treated as `system`
-  - `unsupported_script` is treated as `script`
+    - `unsupported` is treated as `system`
+    - `unsupported_script` is treated as `script`
 
 #### `alias`
 
@@ -474,7 +561,7 @@ hooks:
 
 !!! note "prek-only"
 
-  `env` is a `prek` extension and may not be recognized by upstream `pre-commit`.
+    `env` is a `prek` extension and may not be recognized by upstream `pre-commit`.
 
 Extra environment variables for the hook process.
 
@@ -501,12 +588,17 @@ repos:
 
 #### `files` / `exclude`
 
-Regex filters applied to candidate filenames.
+Filters applied to candidate filenames.
 
 - `files` selects which files are eligible for the hook.
 - `exclude` removes files matched by `files`.
 
 If you use both global and hook-level filters, the effective behavior is “global filter first, then hook filter”.
+
+By default (and for compatibility with upstream `pre-commit`), these are regex strings.
+As a `prek` extension, you can also specify globs using `glob` or a glob list.
+
+See [Top-level `files`](#top-level-files) and [Top-level `exclude`](#top-level-exclude) for the full syntax and examples.
 
 #### `types` / `types_or` / `exclude_types`
 
@@ -580,7 +672,7 @@ This is useful for tools that use global caches/locks or otherwise can’t handl
 
 !!! note "prek-only"
 
-  `priority` controls `prek`'s scheduler and does not exist in upstream `pre-commit`.
+    `priority` controls `prek`'s scheduler and does not exist in upstream `pre-commit`.
 
 Each hook can set an explicit `priority` (a non-negative integer) that controls when it runs and with which hooks it may execute in parallel.
 
@@ -682,7 +774,7 @@ If you set this for a language that doesn’t support dependency installation, `
 
 !!! note "prek-only"
 
-  This is a `prek`-specific requirement gate. Upstream `pre-commit` does not have a hook-level minimum version key.
+    This is a `prek`-specific requirement gate. Upstream `pre-commit` does not have a hook-level minimum version key.
 
 Require a minimum `prek` version for this specific hook.
 
