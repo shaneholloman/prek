@@ -2,6 +2,8 @@
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
     'config:recommended',
+    // https://docs.renovatebot.com/presets-default/#configmigration
+    ':configMigration',
   ],
   schedule: [
     '* * 1,15 * *'
@@ -64,7 +66,7 @@
     {
       groupName: 'pre-commit',
       matchManagers: ['pre-commit'],
-      matchPaths: ['.pre-commit-config.yaml']
+      matchFileNames: ['.pre-commit-config.yaml']
     },
     // Annotate GitHub Actions SHAs with a SemVer version.
     {
