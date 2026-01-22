@@ -318,6 +318,7 @@ prek list [OPTIONS] [HOOK|PROJECT]...
 </ul></dd><dt id="prek-list--language"><a href="#prek-list--language"><code>--language</code></a> <i>language</i></dt><dd><p>Show only hooks that are implemented in the specified language</p>
 <p>Possible values:</p>
 <ul>
+<li><code>bun</code></li>
 <li><code>conda</code></li>
 <li><code>coursier</code></li>
 <li><code>dart</code></li>
@@ -624,6 +625,7 @@ prek cache gc [OPTIONS]
 <li><code>always</code>:  Enables colored output regardless of the detected environment</li>
 <li><code>never</code>:  Disables colored output</li>
 </ul></dd><dt id="prek-cache-gc--config"><a href="#prek-cache-gc--config"><code>--config</code></a>, <code>-c</code> <i>config</i></dt><dd><p>Path to alternate config file</p>
+</dd><dt id="prek-cache-gc--dry-run"><a href="#prek-cache-gc--dry-run"><code>--dry-run</code></a></dt><dd><p>Print what would be removed, but do not delete anything</p>
 </dd><dt id="prek-cache-gc--help"><a href="#prek-cache-gc--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
 </dd><dt id="prek-cache-gc--log-file"><a href="#prek-cache-gc--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
 </dd><dt id="prek-cache-gc--no-progress"><a href="#prek-cache-gc--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>

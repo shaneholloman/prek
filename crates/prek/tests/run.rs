@@ -2741,6 +2741,12 @@ fn system_language_version() {
                 language_version: system
                 entry: go version
                 pass_filenames: false
+              - id: system-bun
+                name: system-bun
+                language: bun
+                language_version: system
+                entry: bun -e 'console.log(`Bun ${Bun.version}`)'
+                pass_filenames: false
    "});
     context.git_add(".");
 
@@ -2750,7 +2756,8 @@ fn system_language_version() {
         context.run()
         .arg("system-node")
         .env(EnvVars::PREK_INTERNAL__GO_BINARY_NAME, "go-never-exist")
-        .env(EnvVars::PREK_INTERNAL__NODE_BINARY_NAME, "node-never-exist"), @r"
+        .env(EnvVars::PREK_INTERNAL__NODE_BINARY_NAME, "node-never-exist")
+        .env(EnvVars::PREK_INTERNAL__BUN_BINARY_NAME, "bun-never-exist"), @r"
     success: false
     exit_code: 2
     ----- stdout -----
@@ -2766,7 +2773,8 @@ fn system_language_version() {
         context.run()
         .arg("system-go")
         .env(EnvVars::PREK_INTERNAL__GO_BINARY_NAME, "go-never-exist")
-        .env(EnvVars::PREK_INTERNAL__NODE_BINARY_NAME, "node-never-exist"), @r"
+        .env(EnvVars::PREK_INTERNAL__NODE_BINARY_NAME, "node-never-exist")
+        .env(EnvVars::PREK_INTERNAL__BUN_BINARY_NAME, "bun-never-exist"), @r"
     success: false
     exit_code: 2
     ----- stdout -----
@@ -2777,6 +2785,23 @@ fn system_language_version() {
       caused by: No suitable system Go version found and downloads are disabled
     ");
 
+    cmd_snapshot!(
+        context.filters(),
+        context.run()
+        .arg("system-bun")
+        .env(EnvVars::PREK_INTERNAL__GO_BINARY_NAME, "go-never-exist")
+        .env(EnvVars::PREK_INTERNAL__NODE_BINARY_NAME, "node-never-exist")
+        .env(EnvVars::PREK_INTERNAL__BUN_BINARY_NAME, "bun-never-exist"), @r"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to install hook `system-bun`
+      caused by: Failed to install bun
+      caused by: No suitable system Bun version found and downloads are disabled
+    ");
+
     // When binaries are available, hooks pass.
     cmd_snapshot!(context.filters(), context.run(), @r"
     success: true
@@ -2784,6 +2809,7 @@ fn system_language_version() {
     ----- stdout -----
     system-node..............................................................Passed
     system-go................................................................Passed
+    system-bun...............................................................Passed
 
     ----- stderr -----
     ");
@@ -2929,6 +2955,58 @@ fn expands_tilde_in_prek_home() -> Result<()> {
         .work_dir()
         .child("~")
         .assert(predicate::path::missing());
+
+    Ok(())
+}
+
+#[test]
+fn run_with_tree_object_as_ref() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+    context.configure_git_author();
+
+    let cwd = context.work_dir();
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: echo-files
+                name: echo files
+                entry: echo
+                language: system
+                pass_filenames: true
+    "});
+
+    // Create initial commit
+    cwd.child("file1.txt").write_str("hello")?;
+    context.git_add(".");
+    context.git_commit("Initial commit");
+
+    // Create some changes and stage them
+    cwd.child("file2.txt").write_str("world")?;
+    context.git_add("file2.txt");
+
+    // Get the tree object from the staged changes
+    let tree_output = Command::new("git")
+        .arg("write-tree")
+        .current_dir(cwd)
+        .output()
+        .expect("Failed to run git write-tree");
+    let tree_sha = String::from_utf8_lossy(&tree_output.stdout)
+        .trim()
+        .to_string();
+
+    // Run prek with tree object as to-ref (should work with .. syntax)
+    cmd_snapshot!(context.filters(), context.run()
+        .arg("--from-ref").arg("HEAD")
+        .arg("--to-ref").arg(&tree_sha), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    echo files...............................................................Passed
+
+    ----- stderr -----
+    ");
 
     Ok(())
 }
