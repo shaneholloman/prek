@@ -83,14 +83,20 @@ fn meta_hooks_unknown_hook() {
     "});
     context.git_add(".");
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context.filters(), context.run(), @"
     success: false
     exit_code: 2
     ----- stdout -----
 
     ----- stderr -----
     error: Failed to parse `.pre-commit-config.yaml`
-      caused by: Invalid meta repo: unknown meta hook id `this-hook-does-not-exist`
+      caused by: error: line 4 column 9: unknown meta hook id `this-hook-does-not-exist` at line 4, column 9
+     --> <input>:4:9
+      |
+    2 |   - repo: meta
+    3 |     hooks:
+    4 |       - id: this-hook-does-not-exist
+      |         ^ unknown meta hook id `this-hook-does-not-exist` at line 4, column 9
     ");
 }
 
