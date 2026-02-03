@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallSource {
     Homebrew,
-    Cargo,
+    StandaloneInstaller,
 }
 
 impl InstallSource {
@@ -24,14 +24,24 @@ impl InstallSource {
             return Some(Self::Homebrew);
         }
 
-        // Check for cargo bin installation: .../.cargo/bin/...
-        let cargo = OsStr::new(".cargo");
-        let bin = OsStr::new("bin");
-        if components.windows(2).any(|w| w[0] == cargo && w[1] == bin) {
-            return Some(Self::Cargo);
+        // Check for standalone installer installation
+        #[cfg(feature = "self-update")]
+        match Self::is_standalone_installer() {
+            Ok(true) => return Some(Self::StandaloneInstaller),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("Failed to check for standalone installer: {}", e),
         }
 
         None
+    }
+
+    #[cfg(feature = "self-update")]
+    fn is_standalone_installer() -> anyhow::Result<bool> {
+        use axoupdater::AxoUpdater;
+
+        let mut updater = AxoUpdater::new_for("prek");
+        let updater = updater.load_receipt()?;
+        Ok(updater.check_receipt_is_for_this_executable()?)
     }
 
     /// Detect the install source from the current executable path.
@@ -43,7 +53,7 @@ impl InstallSource {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Self::Homebrew => "Homebrew",
-            Self::Cargo => "cargo",
+            Self::StandaloneInstaller => "the standalone installer",
         }
     }
 
@@ -51,7 +61,7 @@ impl InstallSource {
     pub(crate) fn update_instructions(self) -> &'static str {
         match self {
             Self::Homebrew => "brew update && brew upgrade prek",
-            Self::Cargo => "cargo install --locked prek",
+            Self::StandaloneInstaller => "prek self update",
         }
     }
 }
@@ -77,22 +87,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_cargo_bin_macos() {
-        assert_eq!(
-            InstallSource::from_path(Path::new("/Users/user/.cargo/bin/prek")),
-            Some(InstallSource::Cargo)
-        );
-    }
-
-    #[test]
-    fn detects_cargo_bin_linux() {
-        assert_eq!(
-            InstallSource::from_path(Path::new("/home/user/.cargo/bin/prek")),
-            Some(InstallSource::Cargo)
-        );
-    }
-
-    #[test]
     fn returns_none_for_unknown_unix_path() {
         assert_eq!(
             InstallSource::from_path(Path::new("/usr/local/bin/prek")),
@@ -105,15 +99,6 @@ mod tests {
         assert_eq!(
             InstallSource::from_path(Path::new("/opt/homebrew/Cellar/other/0.1.0/bin/prek")),
             None
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn detects_cargo_bin_windows() {
-        assert_eq!(
-            InstallSource::from_path(Path::new(r"C:\Users\user\.cargo\bin\prek.exe")),
-            Some(InstallSource::Cargo)
         );
     }
 
