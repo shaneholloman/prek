@@ -875,20 +875,21 @@ pub(crate) struct Config {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-    #[error("Config file not found: {0}")]
-    NotFound(String),
-
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
     #[error("Failed to parse `{0}`")]
     Yaml(String, #[source] Box<serde_saphyr::Error>),
+
+    #[error("Failed to parse `{0}`")]
+    Toml(String, #[source] Box<toml::de::Error>),
 }
 
 impl Error {
     /// Warn the user if the config error is a parse error (not "file not found").
     pub(crate) fn warn_parse_error(&self) {
-        if matches!(self, Self::NotFound(_)) {
+        // Skip file not found errors.
+        if matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::NotFound) {
             return;
         }
         if let Some(cause) = self.source() {
@@ -996,16 +997,14 @@ fn warn_unused_paths(path: &Path, entries: &[String]) {
 
 /// Read the configuration file from the given path.
 pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
-    let content = match fs_err::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::NotFound(path.user_display().to_string()));
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let content = fs_err::read_to_string(path)?;
 
-    let config = serde_saphyr::from_str(&content)
-        .map_err(|e| Error::Yaml(path.user_display().to_string(), Box::new(e)))?;
+    let config = match path.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("toml") => toml::from_str(&content)
+            .map_err(|e| Error::Toml(path.user_display().to_string(), Box::new(e)))?,
+        _ => serde_saphyr::from_str(&content)
+            .map_err(|e| Error::Yaml(path.user_display().to_string(), Box::new(e)))?,
+    };
 
     Ok(config)
 }
@@ -1564,10 +1563,116 @@ mod tests {
     }
 
     #[test]
-    fn test_read_config() -> Result<()> {
+    fn test_read_yaml_config() -> Result<()> {
         let config = read_config(Path::new("tests/fixtures/uv-pre-commit-config.yaml"))?;
         insta::assert_debug_snapshot!(config);
         Ok(())
+    }
+
+    #[test]
+    fn test_read_toml_config() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let toml_path = dir.path().join("prek.toml");
+        fs_err::write(
+            &toml_path,
+            indoc::indoc! {r#"
+            fail_fast = true
+
+            [[repos]]
+            repo = "local"
+
+            [[repos.hooks]]
+            id = "cargo-fmt"
+            name = "cargo fmt"
+            entry = "cargo fmt --"
+            language = "system"
+
+            [[repos]]
+            repo = "https://github.com/pre-commit/pre-commit-hooks"
+            rev = "v6.0.0"
+            hooks = [
+            { id = "trailing-whitespace" },
+            {
+                id = "end-of-file-fixer",
+                args = ["--fix", "crlf"]
+            }
+            ]
+        "#},
+        )?;
+
+        let config = read_config(&toml_path)?;
+        insta::assert_debug_snapshot!(config);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_invalid_toml_config() {
+        let raw = indoc::indoc! {r#"
+            fail_fast = true
+
+            [[repos]]
+            repo = "local"
+
+            [[repos.hooks]]
+            id = "cargo-fmt"
+            name = "cargo fmt"
+            entry = "cargo fmt --"
+            language = "system"
+
+            [[repos]]
+            repo = "https://github.com/pre-commit/pre-commit-hooks"
+            hooks = [
+            { id = "trailing-whitespace" },
+            {
+                id = "end-of-file-fixer",
+                args = ["--fix", "crlf"]
+            }
+            ]
+        "#};
+
+        let err = toml::from_str::<Config>(raw).unwrap_err();
+        insta::assert_snapshot!(err, @"
+        TOML parse error at line 12, column 1
+           |
+        12 | [[repos]]
+           | ^^^^^^^^^
+        missing field `rev`
+        ");
+
+        let raw = indoc::indoc! {r#"
+            fail_fast = true
+
+            [[repos]]
+            repo = "local"
+            rev = "v1.0.0"
+
+            [[repos.hooks]]
+            id = "cargo-fmt"
+            name = "cargo fmt"
+            entry = "cargo fmt --"
+            language = "system"
+
+            [[repos]]
+            repo = "https://github.com/pre-commit/pre-commit-hooks"
+            rev = "v6.0.0"
+            hooks = [
+            { id = "trailing-whitespace" },
+            {
+                id = "end-of-file-fixer",
+                args = ["--fix", "crlf"]
+            }
+            ]
+        "#};
+
+        let err = toml::from_str::<Config>(raw).unwrap_err();
+        insta::assert_snapshot!(err, @"
+        TOML parse error at line 3, column 1
+          |
+        3 | [[repos]]
+          | ^^^^^^^^^
+        `rev` is not allowed for local repos
+        ");
     }
 
     #[test]
@@ -1861,92 +1966,5 @@ mod tests {
         "};
         let config = serde_saphyr::from_str::<Config>(yaml).unwrap();
         insta::assert_debug_snapshot!(config);
-    }
-}
-
-#[cfg(unix)]
-#[cfg(all(test, feature = "schemars"))]
-mod _gen {
-    use crate::config::Config;
-    use anyhow::bail;
-    use prek_consts::env_vars::EnvVars;
-    use pretty_assertions::StrComparison;
-    use std::path::PathBuf;
-
-    const ROOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
-
-    enum Mode {
-        /// Update the content.
-        Write,
-
-        /// Don't write to the file, check if the file is up-to-date and error if not.
-        Check,
-
-        /// Write the generated help to stdout.
-        DryRun,
-    }
-
-    fn generate() -> String {
-        let settings = schemars::generate::SchemaSettings::draft07();
-        let generator = schemars::SchemaGenerator::new(settings);
-        let schema = generator.into_root_schema_for::<Config>();
-
-        serde_json::to_string_pretty(&schema).unwrap() + "\n"
-    }
-
-    #[test]
-    fn generate_json_schema() -> anyhow::Result<()> {
-        let mode = if EnvVars::is_set(EnvVars::PREK_GENERATE) {
-            Mode::Write
-        } else {
-            Mode::Check
-        };
-
-        let schema_string = generate();
-        let filename = "prek.schema.json";
-        let schema_path = PathBuf::from(ROOT_DIR).join(filename);
-
-        match mode {
-            Mode::DryRun => {
-                anstream::println!("{schema_string}");
-            }
-            Mode::Check => match fs_err::read_to_string(schema_path) {
-                Ok(current) => {
-                    if current == schema_string {
-                        anstream::println!("Up-to-date: {filename}");
-                    } else {
-                        let comparison = StrComparison::new(&current, &schema_string);
-                        bail!(
-                            "{filename} changed, please run `mise run generate` to update:\n{comparison}"
-                        );
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    bail!("{filename} not found, please run `mise run generate` to generate");
-                }
-                Err(err) => {
-                    bail!("{filename} changed, please run `mise run generate` to update:\n{err}");
-                }
-            },
-            Mode::Write => match fs_err::read_to_string(&schema_path) {
-                Ok(current) => {
-                    if current == schema_string {
-                        anstream::println!("Up-to-date: {filename}");
-                    } else {
-                        anstream::println!("Updating: {filename}");
-                        fs_err::write(schema_path, schema_string.as_bytes())?;
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    anstream::println!("Updating: {filename}");
-                    fs_err::write(schema_path, schema_string.as_bytes())?;
-                }
-                Err(err) => {
-                    bail!("{filename} changed, please run `mise run generate` to update:\n{err}");
-                }
-            },
-        }
-
-        Ok(())
     }
 }

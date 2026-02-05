@@ -8,9 +8,10 @@ use futures::StreamExt;
 use itertools::Itertools;
 use lazy_regex::regex;
 use owo_colors::OwoColorize;
-use prek_consts::MANIFEST_FILE;
+use prek_consts::PRE_COMMIT_HOOKS_YAML;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
+use toml_edit::DocumentMut;
 use tracing::{debug, trace};
 
 use crate::cli::ExitStatus;
@@ -377,7 +378,7 @@ async fn checkout_and_validate_manifest(
     if cfg!(windows) {
         git::git_cmd("git show")?
             .arg("show")
-            .arg(format!("{rev}:{MANIFEST_FILE}"))
+            .arg(format!("{rev}:{PRE_COMMIT_HOOKS_YAML}"))
             .current_dir(repo_path)
             .remove_git_envs()
             .stdout(Stdio::null())
@@ -391,7 +392,7 @@ async fn checkout_and_validate_manifest(
         .arg("--quiet")
         .arg(rev)
         .arg("--")
-        .arg(MANIFEST_FILE)
+        .arg(PRE_COMMIT_HOOKS_YAML)
         .current_dir(repo_path)
         .remove_git_envs()
         .stdout(Stdio::null())
@@ -399,7 +400,7 @@ async fn checkout_and_validate_manifest(
         .status()
         .await?;
 
-    let manifest = config::read_manifest(&repo_path.join(MANIFEST_FILE))?;
+    let manifest = config::read_manifest(&repo_path.join(PRE_COMMIT_HOOKS_YAML))?;
     let new_hook_ids = manifest
         .hooks
         .into_iter()
@@ -452,8 +453,104 @@ async fn get_best_candidate_tag(repo: &Path, rev: &str, current_rev: &str) -> Re
 }
 
 async fn write_new_config(path: &Path, revisions: &[Option<Revision>]) -> Result<()> {
-    let mut lines = fs_err::tokio::read_to_string(path)
-        .await?
+    let content = fs_err::tokio::read_to_string(path).await?;
+    let new_content = match path.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("toml") => {
+            render_updated_toml_config(path, &content, revisions)?
+        }
+        _ => render_updated_yaml_config(path, &content, revisions)?,
+    };
+
+    fs_err::tokio::write(path, new_content)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to write updated config file `{}`",
+                path.user_display()
+            )
+        })?;
+
+    Ok(())
+}
+
+fn render_updated_toml_config(
+    path: &Path,
+    content: &str,
+    revisions: &[Option<Revision>],
+) -> Result<String> {
+    let mut doc = content.parse::<DocumentMut>()?;
+    let Some(repos) = doc
+        .get_mut("repos")
+        .and_then(|item| item.as_array_of_tables_mut())
+    else {
+        anyhow::bail!("Missing `[[repos]]` array in `{}`", path.user_display());
+    };
+
+    let mut remote_repos = Vec::new();
+    for table in repos.iter_mut() {
+        let repo_value = table
+            .get("repo")
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+
+        if matches!(repo_value, "local" | "meta" | "builtin") {
+            continue;
+        }
+
+        if !table.contains_key("rev") {
+            anyhow::bail!(
+                "Found remote repo without `rev` in `{}`",
+                path.user_display()
+            );
+        }
+
+        remote_repos.push(table);
+    }
+
+    if remote_repos.len() != revisions.len() {
+        anyhow::bail!(
+            "Found {} remote repos in `{}` but expected {}, file content may have changed",
+            remote_repos.len(),
+            path.user_display(),
+            revisions.len()
+        );
+    }
+
+    for (table, revision) in remote_repos.into_iter().zip_eq(revisions) {
+        let Some(revision) = revision else {
+            continue;
+        };
+
+        let Some(value) = table.get_mut("rev").and_then(|item| item.as_value_mut()) else {
+            continue;
+        };
+
+        let suffix = value
+            .decor()
+            .suffix()
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.trim_start().starts_with("# frozen:"))
+            .map(str::to_string);
+
+        *value = toml_edit::Value::from(revision.rev.clone());
+
+        if let Some(frozen) = &revision.frozen {
+            value.decor_mut().set_suffix(format!(" # frozen: {frozen}"));
+        } else if let Some(suffix) = suffix {
+            value.decor_mut().set_suffix(suffix);
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+fn render_updated_yaml_config(
+    path: &Path,
+    content: &str,
+    revisions: &[Option<Revision>],
+) -> Result<String> {
+    let mut lines = content
         .split_inclusive('\n')
         .map(ToString::to_string)
         .collect::<Vec<_>>();
@@ -495,7 +592,7 @@ async fn write_new_config(path: &Path, revisions: &[Option<Revision>]) -> Result
 
         let comment = if let Some(frozen) = &revision.frozen {
             format!("  # frozen: {frozen}")
-        } else if caps[5].trim().starts_with("# frozen:") {
+        } else if caps[5].trim_start().starts_with("# frozen:") {
             String::new()
         } else {
             caps[5].to_string()
@@ -507,16 +604,7 @@ async fn write_new_config(path: &Path, revisions: &[Option<Revision>]) -> Result
         );
     }
 
-    fs_err::tokio::write(path, lines.join("").as_bytes())
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to write updated config file `{}`",
-                path.user_display()
-            )
-        })?;
-
-    Ok(())
+    Ok(lines.join(""))
 }
 
 #[cfg(test)]
