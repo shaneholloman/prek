@@ -33,13 +33,13 @@ while also providing some additional long-requested features.
 
 ## Features
 
-- 🚀 A single binary with no dependencies, does not require Python or any other runtime.
-- ⚡ [Faster](https://prek.j178.dev/benchmark/) than `pre-commit` and more efficient in disk space usage.
-- 🔄 Fully compatible with the original pre-commit configurations and hooks.
-- 🏗️ Built-in support for monorepos (i.e. [workspace mode](https://prek.j178.dev/workspace/)).
-- 🐍 Integration with [`uv`](https://github.com/astral-sh/uv) for managing Python virtual environments and dependencies.
-- 🛠️ Improved toolchain installations for Python, Node.js, Bun, Go, Rust and Ruby, shared between hooks.
-- 📦 [Built-in](https://prek.j178.dev/builtin/) Rust-native implementation of some common hooks.
+- A single binary with no dependencies, does not require Python or any other runtime.
+- [Faster](https://prek.j178.dev/benchmark/) than `pre-commit` and more efficient in disk space usage.
+- Fully compatible with the original pre-commit configurations and hooks.
+- Built-in support for monorepos (i.e. [workspace mode](https://prek.j178.dev/workspace/)).
+- Integration with [`uv`](https://github.com/astral-sh/uv) for managing Python virtual environments and dependencies.
+- Improved toolchain installations for Python, Node.js, Bun, Go, Rust and Ruby, shared between hooks.
+- [Built-in](https://prek.j178.dev/builtin/) Rust-native implementation of some common hooks.
 
 <!-- --8<-- [end:features] -->
 
@@ -63,7 +63,7 @@ On Linux and macOS:
 <!-- --8<-- [start: linux-standalone-install] -->
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.3.1/prek-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.3.2/prek-installer.sh | sh
 ```
 
 <!-- --8<-- [end: linux-standalone-install] -->
@@ -73,7 +73,7 @@ On Windows:
 <!-- --8<-- [start: windows-standalone-install] -->
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.3.1/prek-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.3.2/prek-installer.ps1 | iex"
 ```
 
 <!-- --8<-- [end: windows-standalone-install] -->
