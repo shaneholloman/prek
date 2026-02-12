@@ -837,10 +837,13 @@ where
 // TODO: warn sensible regex
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(
     feature = "schemars",
-    schemars(title = "prek configuration file format")
+    derive(schemars::JsonSchema),
+    schemars(title = "prek.toml"),
+    schemars(description = "The configuration file for prek, a git hook manager written in Rust."),
+    schemars(extend("$id" = "https://www.schemastore.org/prek.json")),
+    schemars(extend("x-tombi-toml-version" = "v1.1.0")),
 )]
 pub(crate) struct Config {
     pub repos: Vec<Repo>,
