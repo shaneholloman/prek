@@ -63,7 +63,7 @@ On Linux and macOS:
 <!-- --8<-- [start: linux-standalone-install] -->
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.3.2/prek-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.3.3/prek-installer.sh | sh
 ```
 
 <!-- --8<-- [end: linux-standalone-install] -->
@@ -73,7 +73,7 @@ On Windows:
 <!-- --8<-- [start: windows-standalone-install] -->
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.3.2/prek-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.3.3/prek-installer.ps1 | iex"
 ```
 
 <!-- --8<-- [end: windows-standalone-install] -->
@@ -380,6 +380,7 @@ prek is pretty new, but it is already being used or recommend by some projects a
 - [cocoindex-io/cocoindex](https://github.com/cocoindex-io/cocoindex/pull/1564)
 - [cachix/devenv](https://github.com/cachix/devenv/pull/2304)
 - [copper-project/copper-rs](https://github.com/copper-project/copper-rs/pull/783)
+- [bramstroker/homeassistant-powercalc](https://github.com/bramstroker/homeassistant-powercalc/pull/3978)
 
 <!-- --8<-- [end: why] -->
 
