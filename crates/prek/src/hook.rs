@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
@@ -7,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
-use clap::ValueEnum;
 use prek_consts::PRE_COMMIT_HOOKS_YAML;
 use prek_identify::{TagSet, tags::TAG_FILE};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -18,7 +16,7 @@ use tracing::trace;
 
 use crate::config::{
     self, BuiltinHook, Config, FilePattern, HookOptions, Language, LocalHook, ManifestHook,
-    MetaHook, RemoteHook, Stage, read_manifest,
+    MetaHook, RemoteHook, Stages, read_manifest,
 };
 use crate::languages::version::LanguageRequest;
 use crate::languages::{extract_metadata, resolve_command};
@@ -323,14 +321,15 @@ impl HookBuilder {
         let alias = options.alias.unwrap_or_default();
         let args = options.args.unwrap_or_default();
         let env = options.env.unwrap_or_default();
-        let types = options.types.map_or(TAG_FILE, TagSet::from_tags);
-        let types_or = TagSet::from_tags(options.types_or.unwrap_or_default());
-        let exclude_types = TagSet::from_tags(options.exclude_types.unwrap_or_default());
+        let types = options.types.unwrap_or(TAG_FILE);
+        let types_or = options.types_or.unwrap_or_default();
+        let exclude_types = options.exclude_types.unwrap_or_default();
         let always_run = options.always_run.unwrap_or_default();
         let fail_fast = options.fail_fast.unwrap_or_default();
         let pass_filenames = options.pass_filenames.unwrap_or(true);
         let require_serial = options.require_serial.unwrap_or(false);
         let verbose = options.verbose.unwrap_or(false);
+        let stages = options.stages.unwrap_or_default();
         let additional_dependencies = options
             .additional_dependencies
             .unwrap_or_default()
@@ -344,18 +343,6 @@ impl HookBuilder {
         })?;
 
         let entry = Entry::new(self.hook_spec.id.clone(), self.hook_spec.entry);
-
-        let stages = match options.stages {
-            Some(stages) => {
-                let stages: BTreeSet<_> = stages.into_iter().collect();
-                if stages.is_empty() || stages.len() == Stage::value_variants().len() {
-                    Stages::All
-                } else {
-                    Stages::Some(stages)
-                }
-            }
-            None => Stages::All,
-        };
 
         let priority = self
             .hook_spec
@@ -404,37 +391,6 @@ impl HookBuilder {
         }
 
         Ok(hook)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum Stages {
-    All,
-    Some(BTreeSet<Stage>),
-}
-
-impl Stages {
-    pub(crate) fn contains(&self, stage: Stage) -> bool {
-        match self {
-            Stages::All => true,
-            Stages::Some(stages) => stages.contains(&stage),
-        }
-    }
-}
-
-impl Display for Stages {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Stages::All => write!(f, "all"),
-            Stages::Some(stages) => {
-                let stages_str = stages
-                    .iter()
-                    .map(Stage::as_ref)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(f, "{stages_str}")
-            }
-        }
     }
 }
 
@@ -881,6 +837,7 @@ mod tests {
 
     use anyhow::Result;
     use prek_consts::PRE_COMMIT_CONFIG_YAML;
+    use prek_identify::tags;
     use rustc_hash::FxHashMap;
 
     use crate::config::{HookOptions, Language, RemoteHook};
@@ -940,7 +897,7 @@ mod tests {
             priority: Some(42),
             options: HookOptions {
                 alias: Some("alias-1".to_string()),
-                types: Some(vec!["text".to_string()]),
+                types: Some(tags::TAG_TEXT),
                 args: Some(vec!["--flag".to_string()]),
                 env: Some(override_env),
                 always_run: Some(true),
@@ -971,9 +928,11 @@ mod tests {
                         },
                     ),
                     default_stages: Some(
-                        [
-                            Manual,
-                        ],
+                        Some(
+                            {
+                                Manual,
+                            },
+                        ),
                     ),
                     files: None,
                     exclude: None,

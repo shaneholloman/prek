@@ -96,7 +96,8 @@
       "type": "array",
       "items": {
         "$ref": "#/definitions/Stage"
-      }
+      },
+      "uniqueItems": true
     },
     "files": {
       "description": "Global file include pattern.",
@@ -218,21 +219,24 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "types_or": {
           "description": "List of file types to run on (OR).\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "exclude_types": {
           "description": "List of file types to exclude.\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "additional_dependencies": {
           "description": "Not documented in the official docs.",
@@ -288,7 +292,8 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Stage"
-          }
+          },
+          "uniqueItems": true
         },
         "verbose": {
           "description": "Print the output of the hook even if it passes.\nDefault is false.",
@@ -442,21 +447,24 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "types_or": {
           "description": "List of file types to run on (OR).\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "exclude_types": {
           "description": "List of file types to exclude.\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "additional_dependencies": {
           "description": "Not documented in the official docs.",
@@ -512,7 +520,8 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Stage"
-          }
+          },
+          "uniqueItems": true
         },
         "verbose": {
           "description": "Print the output of the hook even if it passes.\nDefault is false.",
@@ -596,21 +605,24 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "types_or": {
           "description": "List of file types to run on (OR).\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "exclude_types": {
           "description": "List of file types to exclude.\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "additional_dependencies": {
           "description": "Not documented in the official docs.",
@@ -666,7 +678,8 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Stage"
-          }
+          },
+          "uniqueItems": true
         },
         "verbose": {
           "description": "Print the output of the hook even if it passes.\nDefault is false.",
@@ -755,21 +768,24 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "types_or": {
           "description": "List of file types to run on (OR).\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "exclude_types": {
           "description": "List of file types to exclude.\nDefault is `[]`.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "additional_dependencies": {
           "description": "Not documented in the official docs.",
@@ -825,7 +841,8 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Stage"
-          }
+          },
+          "uniqueItems": true
         },
         "verbose": {
           "description": "Print the output of the hook even if it passes.\nDefault is false.",

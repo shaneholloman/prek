@@ -1,16 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as _;
 use std::fmt::Display;
 use std::ops::RangeInclusive;
 use std::path::Path;
 
 use anyhow::Result;
+use clap::ValueEnum;
 use fancy_regex::Regex;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+
+use prek_identify::TagSet;
 
 use crate::fs::Simplified;
 use crate::install_source::InstallSource;
@@ -264,6 +267,68 @@ impl Stage {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) enum Stages {
+    #[default]
+    All,
+    Some(BTreeSet<Stage>),
+}
+
+impl Stages {
+    pub(crate) fn contains(&self, stage: Stage) -> bool {
+        match self {
+            Self::All => true,
+            Self::Some(stages) => stages.contains(&stage),
+        }
+    }
+
+    pub(crate) fn to_vec(&self) -> Vec<Stage> {
+        match self {
+            Self::All => Stage::value_variants().to_vec(),
+            Self::Some(stages) => stages.iter().copied().collect(),
+        }
+    }
+}
+
+impl Display for Stages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => write!(f, "all"),
+            Self::Some(stages) => {
+                let stages_str = stages.iter().map(ToString::to_string).join(", ");
+                write!(f, "{stages_str}")
+            }
+        }
+    }
+}
+
+impl From<Vec<Stage>> for Stages {
+    fn from(value: Vec<Stage>) -> Self {
+        let stages: BTreeSet<_> = value.into_iter().collect();
+        if stages.is_empty() || stages.len() == Stage::value_variants().len() {
+            Self::All
+        } else {
+            Self::Some(stages)
+        }
+    }
+}
+
+impl<const N: usize> From<[Stage; N]> for Stages {
+    fn from(value: [Stage; N]) -> Self {
+        Self::from(Vec::from(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for Stages {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let stages = Vec::<Stage>::deserialize(deserializer)?;
+        Ok(Self::from(stages))
+    }
+}
+
 /// Common hook options.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -277,16 +342,13 @@ pub(crate) struct HookOptions {
     pub exclude: Option<FilePattern>,
     /// List of file types to run on (AND).
     /// Default is `[file]`, which matches all files.
-    #[serde(deserialize_with = "deserialize_and_validate_tags", default)]
-    pub types: Option<Vec<String>>,
+    pub types: Option<TagSet>,
     /// List of file types to run on (OR).
     /// Default is `[]`.
-    #[serde(deserialize_with = "deserialize_and_validate_tags", default)]
-    pub types_or: Option<Vec<String>>,
+    pub types_or: Option<TagSet>,
     /// List of file types to exclude.
     /// Default is `[]`.
-    #[serde(deserialize_with = "deserialize_and_validate_tags", default)]
-    pub exclude_types: Option<Vec<String>>,
+    pub exclude_types: Option<TagSet>,
     /// Not documented in the official docs.
     pub additional_dependencies: Option<Vec<String>>,
     /// Additional arguments to pass to the hook.
@@ -316,7 +378,7 @@ pub(crate) struct HookOptions {
     /// Select which git hook(s) to run for.
     /// Default all stages are selected.
     /// See <https://pre-commit.com/#confining-hooks-to-run-at-certain-stages>.
-    pub stages: Option<Vec<Stage>>,
+    pub stages: Option<Stages>,
     /// Print the output of the hook even if it passes.
     /// Default is false.
     pub verbose: Option<bool>,
@@ -853,7 +915,7 @@ pub(crate) struct Config {
     pub default_language_version: Option<FxHashMap<Language, String>>,
     /// A configuration-wide default for the stages property of hooks.
     /// Default to all stages.
-    pub default_stages: Option<Vec<Stage>>,
+    pub default_stages: Option<Stages>,
     /// Global file include pattern.
     pub files: Option<FilePattern>,
     /// Global file exclude pattern.
@@ -1102,25 +1164,6 @@ where
     Ok(Some(s))
 }
 
-/// Deserializes a vector of strings and validates that each is a known file type tag.
-fn deserialize_and_validate_tags<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let tags_opt: Option<Vec<String>> = Option::deserialize(deserializer)?;
-    if let Some(tags) = &tags_opt {
-        for tag in tags {
-            if !prek_identify::ALL_TAGS.contains(tag.as_str()) {
-                let msg = format!(
-                    "Type tag `{tag}` is not recognized. Check for typos or upgrade prek to get new tags."
-                );
-                return Err(serde::de::Error::custom(msg));
-            }
-        }
-    }
-    Ok(tags_opt)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1174,33 @@ mod tests {
         r"current version `\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?`",
         "current version `[CURRENT_VERSION]`",
     );
+
+    #[test]
+    fn stages_deserialize_empty_as_all() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            stages: Stages,
+        }
+
+        let parsed: Wrapper = serde_saphyr::from_str("stages: []\n").expect("stages should parse");
+        assert_eq!(parsed.stages, Stages::default());
+        assert!(parsed.stages.contains(Stage::Manual));
+        assert!(parsed.stages.contains(Stage::PreCommit));
+    }
+
+    #[test]
+    fn stages_deserialize_to_subset() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            stages: Stages,
+        }
+
+        let parsed: Wrapper =
+            serde_saphyr::from_str("stages: [pre-commit, manual]\n").expect("stages should parse");
+        assert!(parsed.stages.contains(Stage::PreCommit));
+        assert!(parsed.stages.contains(Stage::Manual));
+        assert!(!parsed.stages.contains(Stage::PrePush));
+    }
 
     #[test]
     fn parse_file_patterns_regex_and_glob() {
