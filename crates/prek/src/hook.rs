@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use prek_consts::PRE_COMMIT_HOOKS_YAML;
-use prek_identify::{TagSet, tags::TAG_FILE};
+use prek_identify::{TagSet, tags};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -310,8 +310,6 @@ impl HookBuilder {
 
     /// Build the hook.
     pub(crate) async fn build(mut self) -> Result<Hook, Error> {
-        // Ensure project-level defaults are applied in one place.
-        // This makes call sites simpler and avoids accidental divergence.
         self.hook_spec.apply_project_defaults(self.project.config());
 
         self.check()?;
@@ -321,11 +319,11 @@ impl HookBuilder {
         let alias = options.alias.unwrap_or_default();
         let args = options.args.unwrap_or_default();
         let env = options.env.unwrap_or_default();
-        let types = options.types.unwrap_or(TAG_FILE);
+        let types = options.types.unwrap_or(tags::TAG_SET_FILE);
         let types_or = options.types_or.unwrap_or_default();
         let exclude_types = options.exclude_types.unwrap_or_default();
-        let always_run = options.always_run.unwrap_or_default();
-        let fail_fast = options.fail_fast.unwrap_or_default();
+        let always_run = options.always_run.unwrap_or(false);
+        let fail_fast = options.fail_fast.unwrap_or(false);
         let pass_filenames = options.pass_filenames.unwrap_or(true);
         let require_serial = options.require_serial.unwrap_or(false);
         let verbose = options.verbose.unwrap_or(false);
@@ -897,7 +895,7 @@ mod tests {
             priority: Some(42),
             options: HookOptions {
                 alias: Some("alias-1".to_string()),
-                types: Some(tags::TAG_TEXT),
+                types: Some(tags::TAG_SET_TEXT),
                 args: Some(vec!["--flag".to_string()]),
                 env: Some(override_env),
                 always_run: Some(true),
