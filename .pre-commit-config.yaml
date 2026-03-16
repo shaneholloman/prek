@@ -9,13 +9,15 @@ repos:
   - repo: builtin
     hooks:
       - id: trailing-whitespace
+        exclude:
+          glob: CHANGELOG.md
       - id: mixed-line-ending
       - id: check-yaml
       - id: check-toml
       - id: end-of-file-fixer
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.43.5
+    rev: v1.44.0
     hooks:
       - id: typos
 
