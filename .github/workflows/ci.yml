@@ -429,8 +429,8 @@ jobs:
           # Swift is preinstalled on ubuntu and macOS; Windows requires setup which is slow
           - os: windows-latest
             language: swift
-          # Haskell setup on Windows is slow
-          - os: windows-latest
+          # GHC is not preinstalled on macOS, and installing it takes a long time
+          - os: macos-latest
             language: haskell
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -512,21 +512,6 @@ jobs:
         uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
         with:
           bun-version: ${{ env.BUN_VERSION }}
-
-      - name: "Cache GHC"
-        if: ${{ matrix.language == 'haskell' }}
-        id: cache-haskell
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: |
-            ~/.ghcup
-            ~/.cabal/store
-            C:/ghcup
-            C:/tools/ghc-${{ env.GHC_VERSION }}
-            C:/tools/cabal-${{ env.CABAL_VERSION }}
-            C:/sr
-          key: ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}
-          restore-keys: ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}
 
       - name: "Install GHC and Cabal"
         if: ${{ matrix.language == 'haskell' }}
