@@ -13,11 +13,13 @@ fn list_builtins_basic() {
     check-added-large-files
     check-case-conflict
     check-executables-have-shebangs
+    check-illegal-windows-names
     check-json
     check-json5
     check-merge-conflict
     check-symlinks
     check-toml
+    check-vcs-permalinks
     check-xml
     check-yaml
     detect-private-key
@@ -48,6 +50,9 @@ fn list_builtins_verbose() {
     check-executables-have-shebangs
       ensures that (non-binary) executables have a shebang.
 
+    check-illegal-windows-names
+      checks for filenames which cannot be created on Windows.
+
     check-json
       checks json files for parseable syntax.
 
@@ -62,6 +67,9 @@ fn list_builtins_verbose() {
 
     check-toml
       checks toml files for parseable syntax.
+
+    check-vcs-permalinks
+      ensures that links to vcs websites are permalinks.
 
     check-xml
       checks xml files for parseable syntax.
@@ -116,6 +124,11 @@ fn list_builtins_json() {
         "description": "ensures that (non-binary) executables have a shebang."
       },
       {
+        "id": "check-illegal-windows-names",
+        "name": "check illegal windows names",
+        "description": "checks for filenames which cannot be created on Windows."
+      },
+      {
         "id": "check-json",
         "name": "check json",
         "description": "checks json files for parseable syntax."
@@ -139,6 +152,11 @@ fn list_builtins_json() {
         "id": "check-toml",
         "name": "check toml",
         "description": "checks toml files for parseable syntax."
+      },
+      {
+        "id": "check-vcs-permalinks",
+        "name": "check vcs permalinks",
+        "description": "ensures that links to vcs websites are permalinks."
       },
       {
         "id": "check-xml",

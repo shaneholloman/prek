@@ -5,11 +5,12 @@ use anyhow::Result;
 use prek_identify::tags;
 
 use crate::cli::reporter::HookRunReporter;
-use crate::config::{BuiltinHook, HookOptions, PassFilenames, Stage};
+use crate::config::{BuiltinHook, FilePattern, HookOptions, PassFilenames, Stage};
 use crate::hook::Hook;
 use crate::hooks::pre_commit_hooks;
 use crate::store::Store;
 
+mod check_illegal_windows_names;
 mod check_json5;
 
 #[derive(
@@ -30,11 +31,13 @@ pub(crate) enum BuiltinHooks {
     CheckAddedLargeFiles,
     CheckCaseConflict,
     CheckExecutablesHaveShebangs,
+    CheckIllegalWindowsNames,
     CheckJson,
     CheckJson5,
     CheckMergeConflict,
     CheckSymlinks,
     CheckToml,
+    CheckVcsPermalinks,
     CheckXml,
     CheckYaml,
     DetectPrivateKey,
@@ -62,6 +65,9 @@ impl BuiltinHooks {
             Self::CheckExecutablesHaveShebangs => {
                 pre_commit_hooks::check_executables_have_shebangs(hook, filenames).await
             }
+            Self::CheckIllegalWindowsNames => Ok(
+                check_illegal_windows_names::check_illegal_windows_names(hook, filenames),
+            ),
             Self::CheckJson => pre_commit_hooks::check_json(hook, filenames).await,
             Self::CheckJson5 => check_json5::check_json5(hook, filenames).await,
             Self::CheckMergeConflict => {
@@ -69,6 +75,9 @@ impl BuiltinHooks {
             }
             Self::CheckSymlinks => pre_commit_hooks::check_symlinks(hook, filenames).await,
             Self::CheckToml => pre_commit_hooks::check_toml(hook, filenames).await,
+            Self::CheckVcsPermalinks => {
+                pre_commit_hooks::check_vcs_permalinks(hook, filenames).await
+            }
             Self::CheckXml => pre_commit_hooks::check_xml(hook, filenames).await,
             Self::CheckYaml => pre_commit_hooks::check_yaml(hook, filenames).await,
             Self::DetectPrivateKey => pre_commit_hooks::detect_private_key(hook, filenames).await,
@@ -129,6 +138,24 @@ impl BuiltinHook {
                     ..Default::default()
                 },
             },
+            BuiltinHooks::CheckIllegalWindowsNames => BuiltinHook {
+                id: "check-illegal-windows-names".to_string(),
+                name: "check illegal windows names".to_string(),
+                entry: "check-illegal-windows-names".to_string(),
+                priority: None,
+                options: HookOptions {
+                    description: Some(
+                        "checks for filenames which cannot be created on Windows.".to_string(),
+                    ),
+                    files: Some(
+                        FilePattern::new_regex(
+                            check_illegal_windows_names::ILLEGAL_WINDOWS_PATTERN,
+                        )
+                        .expect("builtin files regex must be valid"),
+                    ),
+                    ..Default::default()
+                },
+            },
             BuiltinHooks::CheckJson => BuiltinHook {
                 id: "check-json".to_string(),
                 name: "check json".to_string(),
@@ -185,6 +212,19 @@ impl BuiltinHook {
                 options: HookOptions {
                     description: Some("checks toml files for parseable syntax.".to_string()),
                     types: Some(tags::TAG_SET_TOML),
+                    ..Default::default()
+                },
+            },
+            BuiltinHooks::CheckVcsPermalinks => BuiltinHook {
+                id: "check-vcs-permalinks".to_string(),
+                name: "check vcs permalinks".to_string(),
+                entry: "check-vcs-permalinks".to_string(),
+                priority: None,
+                options: HookOptions {
+                    description: Some(
+                        "ensures that links to vcs websites are permalinks.".to_string(),
+                    ),
+                    types: Some(tags::TAG_SET_TEXT),
                     ..Default::default()
                 },
             },

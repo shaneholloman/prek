@@ -41,6 +41,7 @@ Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hoo
 - [`fix-byte-order-marker`](https://github.com/pre-commit/pre-commit-hooks#fix-byte-order-marker) (Remove UTF-8 byte order marker)
 - [`check-json`](https://github.com/pre-commit/pre-commit-hooks#check-json) (Validate JSON files)
 - [`check-toml`](https://github.com/pre-commit/pre-commit-hooks#check-toml) (Validate TOML files)
+- [`check-vcs-permalinks`](https://github.com/pre-commit/pre-commit-hooks#check-vcs-permalinks) (Check that VCS links are permalinks)
 - [`check-yaml`](https://github.com/pre-commit/pre-commit-hooks#check-yaml) (Validate YAML files)
 - [`check-xml`](https://github.com/pre-commit/pre-commit-hooks#check-xml) (Validate XML files)
 - [`mixed-line-ending`](https://github.com/pre-commit/pre-commit-hooks#mixed-line-ending) (Normalize or check line endings)
@@ -92,11 +93,13 @@ For `repo: builtin`, the following hooks are supported:
 - [`trailing-whitespace`](#trailing-whitespace) (Trim trailing whitespace)
 - [`check-added-large-files`](#check-added-large-files) (Prevent committing large files)
 - [`check-case-conflict`](#check-case-conflict) (Check for files that would conflict in case-insensitive filesystems)
+- [`check-illegal-windows-names`](#check-illegal-windows-names) (Check for filenames invalid on Windows)
 - [`end-of-file-fixer`](#end-of-file-fixer) (Ensure newline at EOF)
 - [`fix-byte-order-marker`](#fix-byte-order-marker) (Remove UTF-8 byte order marker)
 - [`check-json`](#check-json) (Validate JSON files)
 - [`check-json5`](#check-json5) (Validate JSON5 files)
 - [`check-toml`](#check-toml) (Validate TOML files)
+- [`check-vcs-permalinks`](#check-vcs-permalinks) (Check that VCS links are permalinks)
 - [`check-yaml`](#check-yaml) (Validate YAML files)
 - [`check-xml`](#check-xml) (Validate XML files)
 - [`mixed-line-ending`](#mixed-line-ending) (Normalize or check line endings)
@@ -181,6 +184,22 @@ Checks for paths that would conflict on a case-insensitive filesystem (for examp
 
 ---
 
+#### `check-illegal-windows-names`
+
+Checks for filenames that cannot be created on Windows.
+
+**Supported arguments**
+
+- None.
+
+**Behavior / caveats**
+
+- Reports filenames containing Windows-reserved device names such as `CON`, `PRN`, `AUX`, `NUL`, `COM1`, and `LPT1`.
+- Reports filenames containing characters forbidden by Windows, including `<`, `>`, `:`, `"`, `\`, `|`, `?`, `*`, and control characters.
+- Reports path segments ending with a trailing `.` or space.
+
+---
+
 #### `end-of-file-fixer`
 
 Ensures files end in a newline and only a newline.
@@ -253,6 +272,23 @@ Attempts to load all TOML files to verify syntax.
 
 - Files must be valid UTF-8; invalid UTF-8 is reported as an error.
 - May report multiple parse errors for a single file.
+
+---
+
+#### `check-vcs-permalinks`
+
+Ensures that links to VCS websites are permalinks.
+
+**Supported arguments** (compatible with `pre-commit-hooks`):
+
+- `--additional-github-domain=<domain>` (repeatable)
+    - Adds extra GitHub-style domains to check in addition to the default `github.com`.
+
+**Behavior / caveats**
+
+- Flags links of the form `https://<domain>/<owner>/<repo>/blob/<branch>/...#L...`.
+- Does not flag commit-hash permalinks where `<branch>` is already a 4-64 character hexadecimal revision.
+- The builtin and fast-path implementations currently follow the upstream hook's GitHub-family matching behavior.
 
 ---
 
