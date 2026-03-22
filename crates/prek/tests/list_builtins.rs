@@ -17,6 +17,7 @@ fn list_builtins_basic() {
     check-json
     check-json5
     check-merge-conflict
+    check-shebang-scripts-are-executable
     check-symlinks
     check-toml
     check-vcs-permalinks
@@ -24,6 +25,7 @@ fn list_builtins_basic() {
     check-yaml
     detect-private-key
     end-of-file-fixer
+    file-contents-sorter
     fix-byte-order-marker
     mixed-line-ending
     no-commit-to-branch
@@ -62,6 +64,9 @@ fn list_builtins_verbose() {
     check-merge-conflict
       checks for files that contain merge conflict strings.
 
+    check-shebang-scripts-are-executable
+      ensures that (non-binary) files with a shebang are executable.
+
     check-symlinks
       checks for symlinks which do not point to anything.
 
@@ -82,6 +87,9 @@ fn list_builtins_verbose() {
 
     end-of-file-fixer
       ensures that a file is either empty, or ends with one newline.
+
+    file-contents-sorter
+      sorts the lines in specified files (defaults to alphabetical).
 
     fix-byte-order-marker
       removes utf-8 byte order marker.
@@ -144,6 +152,11 @@ fn list_builtins_json() {
         "description": "checks for files that contain merge conflict strings."
       },
       {
+        "id": "check-shebang-scripts-are-executable",
+        "name": "check that scripts with shebangs are executable",
+        "description": "ensures that (non-binary) files with a shebang are executable."
+      },
+      {
         "id": "check-symlinks",
         "name": "check for broken symlinks",
         "description": "checks for symlinks which do not point to anything."
@@ -177,6 +190,11 @@ fn list_builtins_json() {
         "id": "end-of-file-fixer",
         "name": "fix end of files",
         "description": "ensures that a file is either empty, or ends with one newline."
+      },
+      {
+        "id": "file-contents-sorter",
+        "name": "file contents sorter",
+        "description": "sorts the lines in specified files (defaults to alphabetical)."
       },
       {
         "id": "fix-byte-order-marker",

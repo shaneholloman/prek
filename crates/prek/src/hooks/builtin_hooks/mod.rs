@@ -35,6 +35,7 @@ pub(crate) enum BuiltinHooks {
     CheckJson,
     CheckJson5,
     CheckMergeConflict,
+    CheckShebangScriptsAreExecutable,
     CheckSymlinks,
     CheckToml,
     CheckVcsPermalinks,
@@ -42,6 +43,7 @@ pub(crate) enum BuiltinHooks {
     CheckYaml,
     DetectPrivateKey,
     EndOfFileFixer,
+    FileContentsSorter,
     FixByteOrderMarker,
     MixedLineEnding,
     NoCommitToBranch,
@@ -73,6 +75,9 @@ impl BuiltinHooks {
             Self::CheckMergeConflict => {
                 pre_commit_hooks::check_merge_conflict(hook, filenames).await
             }
+            Self::CheckShebangScriptsAreExecutable => {
+                pre_commit_hooks::check_shebang_scripts_are_executable(hook, filenames).await
+            }
             Self::CheckSymlinks => pre_commit_hooks::check_symlinks(hook, filenames).await,
             Self::CheckToml => pre_commit_hooks::check_toml(hook, filenames).await,
             Self::CheckVcsPermalinks => {
@@ -82,6 +87,9 @@ impl BuiltinHooks {
             Self::CheckYaml => pre_commit_hooks::check_yaml(hook, filenames).await,
             Self::DetectPrivateKey => pre_commit_hooks::detect_private_key(hook, filenames).await,
             Self::EndOfFileFixer => pre_commit_hooks::fix_end_of_file(hook, filenames).await,
+            Self::FileContentsSorter => {
+                pre_commit_hooks::file_contents_sorter(hook, filenames).await
+            }
             Self::FixByteOrderMarker => {
                 pre_commit_hooks::fix_byte_order_marker(hook, filenames).await
             }
@@ -191,6 +199,21 @@ impl BuiltinHook {
                     ..Default::default()
                 },
             },
+            BuiltinHooks::CheckShebangScriptsAreExecutable => BuiltinHook {
+                id: "check-shebang-scripts-are-executable".to_string(),
+                name: "check that scripts with shebangs are executable".to_string(),
+                entry: "check-shebang-scripts-are-executable".to_string(),
+                priority: None,
+                options: HookOptions {
+                    description: Some(
+                        "ensures that (non-binary) files with a shebang are executable."
+                            .to_string(),
+                    ),
+                    types: Some(tags::TAG_SET_TEXT),
+                    stages: Some([Stage::PreCommit, Stage::PrePush, Stage::Manual].into()),
+                    ..Default::default()
+                },
+            },
             BuiltinHooks::CheckSymlinks => BuiltinHook {
                 id: "check-symlinks".to_string(),
                 name: "check for broken symlinks".to_string(),
@@ -273,6 +296,20 @@ impl BuiltinHook {
                     ),
                     types: Some(tags::TAG_SET_TEXT),
                     stages: Some([Stage::PreCommit, Stage::PrePush, Stage::Manual].into()),
+                    ..Default::default()
+                },
+            },
+            BuiltinHooks::FileContentsSorter => BuiltinHook {
+                id: "file-contents-sorter".to_string(),
+                name: "file contents sorter".to_string(),
+                entry: "file-contents-sorter".to_string(),
+                priority: None,
+                options: HookOptions {
+                    description: Some(
+                        "sorts the lines in specified files (defaults to alphabetical)."
+                            .to_string(),
+                    ),
+                    files: Some(FilePattern::Never),
                     ..Default::default()
                 },
             },

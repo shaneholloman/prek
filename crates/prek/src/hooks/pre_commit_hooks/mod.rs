@@ -10,29 +10,34 @@ mod check_case_conflict;
 mod check_executables_have_shebangs;
 pub(crate) mod check_json;
 mod check_merge_conflict;
+mod check_shebang_scripts_are_executable;
 mod check_symlinks;
 mod check_toml;
 mod check_vcs_permalinks;
 mod check_xml;
 mod check_yaml;
 mod detect_private_key;
+mod file_contents_sorter;
 mod fix_byte_order_marker;
 mod fix_end_of_file;
 mod fix_trailing_whitespace;
 mod mixed_line_ending;
 mod no_commit_to_branch;
+mod shebangs;
 
 pub(crate) use check_added_large_files::check_added_large_files;
 pub(crate) use check_case_conflict::check_case_conflict;
 pub(crate) use check_executables_have_shebangs::check_executables_have_shebangs;
 pub(crate) use check_json::check_json;
 pub(crate) use check_merge_conflict::check_merge_conflict;
+pub(crate) use check_shebang_scripts_are_executable::check_shebang_scripts_are_executable;
 pub(crate) use check_symlinks::check_symlinks;
 pub(crate) use check_toml::check_toml;
 pub(crate) use check_vcs_permalinks::check_vcs_permalinks;
 pub(crate) use check_xml::check_xml;
 pub(crate) use check_yaml::check_yaml;
 pub(crate) use detect_private_key::detect_private_key;
+pub(crate) use file_contents_sorter::file_contents_sorter;
 pub(crate) use fix_byte_order_marker::fix_byte_order_marker;
 pub(crate) use fix_end_of_file::fix_end_of_file;
 pub(crate) use fix_trailing_whitespace::fix_trailing_whitespace;
@@ -46,7 +51,9 @@ pub(crate) enum PreCommitHooks {
     CheckAddedLargeFiles,
     CheckCaseConflict,
     CheckExecutablesHaveShebangs,
+    CheckShebangScriptsAreExecutable,
     CheckVcsPermalinks,
+    FileContentsSorter,
     EndOfFileFixer,
     FixByteOrderMarker,
     CheckJson,
@@ -78,7 +85,11 @@ impl PreCommitHooks {
             Self::CheckExecutablesHaveShebangs => {
                 check_executables_have_shebangs(hook, filenames).await
             }
+            Self::CheckShebangScriptsAreExecutable => {
+                check_shebang_scripts_are_executable(hook, filenames).await
+            }
             Self::CheckVcsPermalinks => check_vcs_permalinks(hook, filenames).await,
+            Self::FileContentsSorter => file_contents_sorter(hook, filenames).await,
             Self::EndOfFileFixer => fix_end_of_file(hook, filenames).await,
             Self::FixByteOrderMarker => fix_byte_order_marker(hook, filenames).await,
             Self::CheckJson => check_json(hook, filenames).await,
