@@ -122,9 +122,43 @@ If the image already defines an `ENTRYPOINT`, you can omit `--entrypoint` in `en
 
 ### dotnet
 
-**Status in prek:** Not supported yet.
+**Status in prek:** ✅ Supported.
 
-Tracking: [#48](https://github.com/j178/prek/issues/48)
+prek supports .NET SDK-based hooks. Hook entries run with a matching `dotnet` on the PATH, and tools specified in `additional_dependencies` are installed into an isolated hook environment via `dotnet tool install --tool-path`.
+
+#### `language_version`
+
+Supported formats:
+
+- `default` or `system`
+- `language_version: "8"` – the .NET 8.0 SDK channel
+- `language_version: "8.0"` – the .NET 8.0 SDK channel
+- `language_version: "8.0.100"` – exactly .NET SDK 8.0.100
+- `language_version: "8.0.1xx"` – the .NET 8.0 SDK feature-band channel
+- `language_version: "net8.0"` – TFM-style alias for the .NET 8.0 SDK channel
+- `language_version: "net8.0.1xx"` – TFM-style alias for the .NET 8.0 SDK feature-band channel
+- `language_version: "net10.0"` – TFM-style alias for the .NET 10.0 SDK channel
+- `language_version: "lts"` – the latest LTS SDK channel
+- `language_version: "sts"` – the latest STS SDK channel
+
+prek first looks for a matching system-installed `dotnet`, then falls back to downloading the SDK via the official install script when downloads are allowed. Channel-style requests (`8`, `8.0`, `8.0.1xx`, `lts`, `sts`, `net8.0`) are resolved to a concrete SDK version at install time.
+
+#### `additional_dependencies`
+
+Tools are installed into the hook's isolated `tools/` directory. Specify them in `additional_dependencies` as either `package:version` (to pin a specific version) or just `package` (to install the latest available version):
+
+```yaml
+repos:
+  - repo: https://github.com/example/csharpier-hook
+    rev: v1.0.0
+    hooks:
+      - id: csharpier
+        additional_dependencies:
+          # Pin to a specific version
+          - "csharpier:1.2.6"
+          # Or install the latest version available
+          - "dotnet-format"
+```
 
 ### fail
 
