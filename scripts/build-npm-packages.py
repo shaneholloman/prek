@@ -117,6 +117,18 @@ PLATFORMS = (
         libc="musl",
     ),
     PlatformSpec(
+        # Android/Termux reports process.platform as "android" and uses
+        # Bionic, not glibc or musl. Reuse the static Linux musl artifact via a
+        # dedicated package with no package-level libc restriction so npm can
+        # install it on Android.
+        rust_target="aarch64-unknown-linux-musl",
+        package_name="@j178/prek-android-arm64",
+        archive_file="prek-aarch64-unknown-linux-musl.tar.gz",
+        binary_name="prek",
+        os=["android"],
+        cpu=["arm64"],
+    ),
+    PlatformSpec(
         rust_target="armv7-unknown-linux-gnueabihf",
         package_name="@j178/prek-linux-arm-gnueabihf",
         archive_file="prek-armv7-unknown-linux-gnueabihf.tar.gz",
