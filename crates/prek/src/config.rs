@@ -40,8 +40,8 @@ impl GlobPatterns {
         self.patterns.is_empty()
     }
 
-    pub(crate) fn is_match(&self, value: &str) -> bool {
-        self.set.is_match(Path::new(value))
+    pub(crate) fn is_match(&self, path: &Path) -> bool {
+        self.set.is_match(path)
     }
 }
 
@@ -182,19 +182,22 @@ pub(crate) enum FilePattern {
 }
 
 impl FilePattern {
-    pub(crate) fn new_glob(patterns: Vec<String>) -> Result<Self, globset::Error> {
+    pub(crate) fn glob(patterns: Vec<String>) -> Result<Self, globset::Error> {
         Ok(Self::Glob(GlobPatterns::new(patterns)?))
     }
 
-    pub(crate) fn new_regex(pattern: &str) -> Result<Self, fancy_regex::Error> {
+    pub(crate) fn regex(pattern: &str) -> Result<Self, fancy_regex::Error> {
         Ok(Self::Regex(Regex::new(pattern)?))
     }
 
-    pub(crate) fn is_match(&self, str: &str) -> bool {
+    pub(crate) fn is_match(&self, path: &Path) -> bool {
         match self {
             FilePattern::Never => false,
-            FilePattern::Regex(regex) => regex.is_match(str).unwrap_or(false),
-            FilePattern::Glob(globs) => globs.is_match(str),
+            // Regex patterns are text matchers; globs can match OS paths directly.
+            FilePattern::Regex(regex) => path
+                .to_str()
+                .is_some_and(|path| regex.is_match(path).unwrap_or(false)),
+            FilePattern::Glob(globs) => globs.is_match(path),
         }
     }
 }
@@ -532,6 +535,19 @@ impl<'de> Deserialize<'de> for PassFilenames {
     }
 }
 
+/// A predefined shell adapter used to run hook entries as shell source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(rename_all = "lowercase"))]
+pub(crate) enum Shell {
+    Sh,
+    Bash,
+    Pwsh,
+    Powershell,
+    Cmd,
+}
+
 /// Common hook options.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -575,6 +591,8 @@ pub(crate) struct HookOptions {
     pub language_version: Option<String>,
     /// Write the output of the hook to a file when the hook fails or verbose is enabled.
     pub log_file: Option<String>,
+    /// Run the hook entry through a predefined shell adapter.
+    pub shell: Option<Shell>,
     /// This hook will execute using a single process instead of in parallel.
     /// Default is false.
     pub require_serial: Option<bool>,
@@ -620,6 +638,7 @@ impl HookOptions {
             description,
             language_version,
             log_file,
+            shell,
             require_serial,
             stages,
             verbose,
@@ -857,6 +876,22 @@ pub(crate) struct RemoteRepo {
     _unused_keys: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct RemoteRepoKey<'a> {
+    repo: &'a str,
+    rev: &'a str,
+}
+
+impl<'a> RemoteRepoKey<'a> {
+    pub(crate) fn repo(self) -> &'a str {
+        self.repo
+    }
+
+    pub(crate) fn rev(self) -> &'a str {
+        self.rev
+    }
+}
+
 impl RemoteRepo {
     pub fn new(repo: String, rev: String, hooks: Vec<RemoteHook>) -> Self {
         Self {
@@ -866,20 +901,12 @@ impl RemoteRepo {
             _unused_keys: BTreeMap::new(),
         }
     }
-}
 
-impl PartialEq for RemoteRepo {
-    fn eq(&self, other: &Self) -> bool {
-        self.repo == other.repo && self.rev == other.rev
-    }
-}
-
-impl Eq for RemoteRepo {}
-
-impl std::hash::Hash for RemoteRepo {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.repo.hash(state);
-        self.rev.hash(state);
+    pub fn key(&self) -> RemoteRepoKey<'_> {
+        RemoteRepoKey {
+            repo: &self.repo,
+            rev: &self.rev,
+        }
     }
 }
 
@@ -1436,9 +1463,9 @@ mod tests {
             matches!(parsed.files, FilePattern::Regex(_)),
             "expected regex pattern"
         );
-        assert!(parsed.files.is_match("src/main.rs"));
-        assert!(!parsed.files.is_match("other/main.rs"));
-        assert!(parsed.exclude.is_match("target/debug/app"));
+        assert!(parsed.files.is_match(Path::new("src/main.rs")));
+        assert!(!parsed.files.is_match(Path::new("other/main.rs")));
+        assert!(parsed.exclude.is_match(Path::new("target/debug/app")));
 
         let glob_yaml = indoc::indoc! {r"
             files:
@@ -1452,10 +1479,10 @@ mod tests {
             matches!(parsed.files, FilePattern::Glob(_)),
             "expected glob pattern"
         );
-        assert!(parsed.files.is_match("src/lib/main.rs"));
-        assert!(!parsed.files.is_match("src/lib/main.py"));
-        assert!(parsed.exclude.is_match("target/debug/app"));
-        assert!(!parsed.exclude.is_match("src/lib/main.rs"));
+        assert!(parsed.files.is_match(Path::new("src/lib/main.rs")));
+        assert!(!parsed.files.is_match(Path::new("src/lib/main.py")));
+        assert!(parsed.exclude.is_match(Path::new("target/debug/app")));
+        assert!(!parsed.exclude.is_match(Path::new("src/lib/main.rs")));
 
         let glob_list_yaml = indoc::indoc! {r"
             files:
@@ -1469,11 +1496,11 @@ mod tests {
         "};
         let parsed: Wrapper =
             serde_saphyr::from_str(glob_list_yaml).expect("glob list patterns should parse");
-        assert!(parsed.files.is_match("src/lib/main.rs"));
-        assert!(parsed.files.is_match("crates/foo/src/lib.rs"));
-        assert!(!parsed.files.is_match("tests/main.rs"));
-        assert!(parsed.exclude.is_match("target/debug/app"));
-        assert!(parsed.exclude.is_match("dist/app"));
+        assert!(parsed.files.is_match(Path::new("src/lib/main.rs")));
+        assert!(parsed.files.is_match(Path::new("crates/foo/src/lib.rs")));
+        assert!(!parsed.files.is_match(Path::new("tests/main.rs")));
+        assert!(parsed.exclude.is_match(Path::new("target/debug/app")));
+        assert!(parsed.exclude.is_match(Path::new("dist/app")));
     }
 
     #[test]
@@ -1488,24 +1515,24 @@ mod tests {
             pattern.to_string(),
             "glob: [src/**/*.rs, crates/**/src/**/*.rs]"
         );
-        assert!(pattern.is_match("src/main.rs"));
-        assert!(pattern.is_match("crates/foo/src/lib.rs"));
-        assert!(!pattern.is_match("tests/main.rs"));
+        assert!(pattern.is_match(Path::new("src/main.rs")));
+        assert!(pattern.is_match(Path::new("crates/foo/src/lib.rs")));
+        assert!(!pattern.is_match(Path::new("tests/main.rs")));
     }
 
     #[test]
     fn file_pattern_never_matches() {
         let pattern = FilePattern::Never;
-        assert!(!pattern.is_match(""));
-        assert!(!pattern.is_match("foo.txt"));
-        assert!(!pattern.is_match("nested/path.rs"));
+        assert!(!pattern.is_match(Path::new("")));
+        assert!(!pattern.is_match(Path::new("foo.txt")));
+        assert!(!pattern.is_match(Path::new("nested/path.rs")));
     }
 
     #[test]
     fn empty_glob_list_matches_nothing() {
         let pattern = serde_saphyr::from_str::<FilePattern>("glob: []").unwrap();
-        assert!(!pattern.is_match("any/file.rs"));
-        assert!(!pattern.is_match(""));
+        assert!(!pattern.is_match(Path::new("any/file.rs")));
+        assert!(!pattern.is_match(Path::new("")));
     }
 
     #[test]

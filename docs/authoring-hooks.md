@@ -20,6 +20,7 @@ each manifest hook:
 | `id` | Yes | No | string | Stable identifier used in end-user configs. |
 | `name` | Yes | No | string | Human-friendly label shown in output. |
 | `entry` | Yes | No | string | Command to execute. |
+| `shell` | No | Yes | string enum | Run `entry` through a predefined shell adapter (`sh`, `bash`, `pwsh`, `powershell`, or `cmd`). |
 | `language` | Yes | No | string | Execution environment, for example `python`, `node`, or `system`. |
 | `alias` | No | No | string | Alternate identifier accepted by `prek run`. |
 | `files` | No | No | regex string | Include only matching files. |
@@ -50,9 +51,19 @@ manifest semantics. For the upstream reference, see:
     `prek`-only fields are accepted by `prek`, but upstream `pre-commit` will not
     recognize them.
 
-    End-user configuration may also set [`env`](configuration.md#prek-only-env).
-    When both the manifest and end-user config define `env`, the maps are merged
-    and end-user values override duplicate keys.
+    End-user configuration may also set [`env`](reference/configuration.md#prek-only-env)
+    and [`shell`](reference/configuration.md#shell). When both the manifest and end-user
+    config define `env`, the maps are merged and end-user values override
+    duplicate keys.
+
+    `pass_filenames: n` with a positive integer is also a `prek` extension.
+    Upstream `pre-commit` only accepts a boolean value.
+
+    When `shell` is set, `entry` is treated as shell source. Hook `args` and
+    filenames are passed as script arguments, so POSIX shell entries should read
+    them with `"$@"`. `shell` is supported only for language backends that use
+    the shell-aware entry resolver; see [`shell`](reference/configuration.md#shell) for
+    the supported languages and exact shell adapter commands.
 
 !!! note "Manifest fields only"
 
@@ -121,7 +132,7 @@ my-hook --max-line-length=120 path/to/file1 path/to/file2
 ## Versioning for `prek auto-update`
 
 End users pin your repository using the `rev` field in their config. To make
-[`prek auto-update`](cli.md#prek-auto-update) work as expected, publish git tags for releases:
+[`prek auto-update`](reference/cli.md#prek-auto-update) work as expected, publish git tags for releases:
 
 - Prefer semantic version tags like `v1.2.3` or `1.2.3`.
 - Push tags to the remote (annotated or lightweight tags both work).
@@ -133,7 +144,7 @@ SHAs into `rev` instead of tag names.
 
 ## Develop locally with `prek try-repo`
 
-[`prek try-repo`](cli.md#prek-try-repo) runs hooks from a repository without publishing a release. This
+[`prek try-repo`](reference/cli.md#prek-try-repo) runs hooks from a repository without publishing a release. This
 is handy while iterating on a hook.
 
 ```bash
@@ -149,7 +160,7 @@ Notes:
 
 ## Validation and CI
 
-Validate your manifest locally with [`prek validate-manifest`](cli.md#prek-validate-manifest):
+Validate your manifest locally with [`prek validate-manifest`](reference/cli.md#prek-validate-manifest):
 
 ```bash
 prek validate-manifest .pre-commit-hooks.yaml

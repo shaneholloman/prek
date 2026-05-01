@@ -27,9 +27,6 @@ impl<'a> FilenameFilter<'a> {
     }
 
     pub(crate) fn filter(&self, filename: &Path) -> bool {
-        let Some(filename) = filename.to_str() else {
-            return false;
-        };
         if let Some(pattern) = &self.include {
             if !pattern.is_match(filename) {
                 return false;
@@ -83,7 +80,7 @@ impl<'a> FileTagFilter<'a> {
 
 pub(crate) struct FileFilter<'a> {
     filenames: Vec<&'a Path>,
-    filename_prefix: &'a Path,
+    filename_prefix: PathBuf,
 }
 
 impl<'a> FileFilter<'a> {
@@ -92,7 +89,7 @@ impl<'a> FileFilter<'a> {
     #[instrument(level = "trace", skip_all, fields(project = %project))]
     pub(crate) fn for_project<I>(
         filenames: I,
-        project: &'a Project,
+        project: &Project,
         mut consumed_files: Option<&mut FxHashSet<&'a Path>>,
     ) -> Self
     where
@@ -102,7 +99,7 @@ impl<'a> FileFilter<'a> {
             project.config().files.as_ref(),
             project.config().exclude.as_ref(),
         );
-
+        let relative_path = project.relative_path();
         let orphan = project.config().orphan.unwrap_or(false);
 
         // The order of below filters matters.
@@ -113,7 +110,7 @@ impl<'a> FileFilter<'a> {
         let filenames = filenames
             .map(PathBuf::as_path)
             // Collect files that are inside the hook project directory.
-            .filter(|filename| filename.starts_with(project.relative_path()))
+            .filter(|filename| filename.starts_with(relative_path))
             // Skip files that have already been consumed by subprojects.
             .filter(|filename| {
                 if let Some(consumed_files) = consumed_files.as_mut() {
@@ -128,7 +125,7 @@ impl<'a> FileFilter<'a> {
             // Strip the project-relative prefix before applying project-level include/exclude patterns.
             .filter(|filename| {
                 let relative = filename
-                    .strip_prefix(project.relative_path())
+                    .strip_prefix(relative_path)
                     .expect("Filename should start with project relative path");
                 filter.filter(relative)
             })
@@ -136,7 +133,7 @@ impl<'a> FileFilter<'a> {
 
         Self {
             filenames,
-            filename_prefix: project.relative_path(),
+            filename_prefix: relative_path.to_path_buf(),
         }
     }
 
@@ -176,7 +173,7 @@ impl<'a> FileFilter<'a> {
 
         let filenames = self.filenames.par_iter().filter(|filename| {
             // Strip the project-relative prefix before applying hook-level include/exclude patterns.
-            if let Ok(relative) = filename.strip_prefix(self.filename_prefix) {
+            if let Ok(relative) = filename.strip_prefix(&self.filename_prefix) {
                 filter.filter(relative)
             } else {
                 false
@@ -200,7 +197,7 @@ impl<'a> FileFilter<'a> {
         // Strip the prefix to get relative paths.
         let filenames: Vec<_> = filenames
             .map(|p| {
-                p.strip_prefix(self.filename_prefix)
+                p.strip_prefix(&self.filename_prefix)
                     .expect("Filename should start with project relative path")
             })
             .collect();
@@ -399,6 +396,10 @@ mod tests {
         FilePattern::Glob(GlobPatterns::new(vec![pattern.to_string()]).unwrap())
     }
 
+    fn regex_pattern(pattern: &str) -> FilePattern {
+        FilePattern::regex(pattern).unwrap()
+    }
+
     #[test]
     fn filename_filter_supports_glob_include_and_exclude() {
         let include = glob_pattern("src/**/*.rs");
@@ -408,5 +409,48 @@ mod tests {
         assert!(filter.filter(Path::new("src/lib/main.rs")));
         assert!(!filter.filter(Path::new("src/lib/ignored.rs")));
         assert!(!filter.filter(Path::new("tests/main.rs")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filename_filter_allows_non_utf8_paths_without_patterns() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let path = Path::new(OsStr::from_bytes(b"bad-\xff.py"));
+        let filter = FilenameFilter::new(None, None);
+
+        assert!(filter.filter(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filename_filter_matches_non_utf8_paths_with_glob_patterns() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let include = glob_pattern("**/*.py");
+        let exclude = glob_pattern("**/*.py");
+        let path = Path::new(OsStr::from_bytes(b"bad-\xff.py"));
+        let filter = FilenameFilter::new(Some(&include), None);
+
+        assert!(filter.filter(path));
+
+        let filter = FilenameFilter::new(None, Some(&exclude));
+
+        assert!(!filter.filter(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filename_filter_skips_non_utf8_paths_with_regex_include() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let include = regex_pattern(r".*\.py$");
+        let path = Path::new(OsStr::from_bytes(b"bad-\xff.py"));
+        let filter = FilenameFilter::new(Some(&include), None);
+
+        assert!(!filter.filter(path));
     }
 }

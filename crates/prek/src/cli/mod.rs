@@ -129,7 +129,7 @@ const STYLES: Styles = Styles::styled()
 #[command(
     name = "prek",
     long_version = crate::version::version(),
-    about = "A Git hook manager written in Rust, designed as a drop-in alternative to pre-commit."
+    about = "A fast Git hook manager written in Rust, designed as a drop-in alternative to pre-commit, reimagined."
 )]
 #[command(
     propagate_version = true,
@@ -745,7 +745,10 @@ pub(crate) struct AutoUpdateArgs {
     /// Do not write changes to the config file, only display what would be changed.
     #[arg(long)]
     pub(crate) dry_run: bool,
-    /// Alias of `--dry-run` that exits with status 1 if updates would be made.
+    /// Exit with status 1 if updates are available.
+    #[arg(long)]
+    pub(crate) exit_code: bool,
+    /// Alias of `--dry-run --exit-code`.
     #[arg(long)]
     pub(crate) check: bool,
     /// Number of threads to use.
@@ -1223,8 +1226,11 @@ mod _gen {
         };
 
         let reference_string = generate(Cli::command());
-        let filename = "cli.md";
-        let reference_path = PathBuf::from(ROOT_DIR).join("docs").join(filename);
+        let filename = "reference/cli.md";
+        let reference_path = PathBuf::from(ROOT_DIR)
+            .join("docs")
+            .join("reference")
+            .join("cli.md");
 
         match mode {
             Mode::DryRun => {
