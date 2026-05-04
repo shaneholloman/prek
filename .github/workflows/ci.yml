@@ -46,6 +46,7 @@ jobs:
       ci-core-filter: ${{ steps.nextest.outputs.ci-core-filter }}
       run-bench: ${{ steps.plan.outputs.run_bench }}
       run-zizmor: ${{ steps.plan.outputs.run_zizmor }}
+      check-docs: ${{ steps.plan.outputs.check_docs }}
       build-release-binaries: ${{ steps.plan.outputs.build_release_binaries }}
       build-docker: ${{ steps.plan.outputs.build_docker }}
     steps:
@@ -78,10 +79,12 @@ jobs:
             [[ "$file" =~ \.rs$ ]] && rust_code_changed=1
             [[ "$file" == "Cargo.toml" || "$file" == "Cargo.lock" || "$file" =~ ^crates/.*/Cargo\.toml$ ]] && rust_deps_changed=1
             [[ "$file" == "rust-toolchain.toml" || "$file" =~ ^\.cargo/ ]] && rust_config_changed=1
-            [[ "$file" == "pyproject.toml" || "$file" =~ ^python/ ]] && python_config_changed=1
+            [[ "$file" == "pyproject.toml" ]] && pyproject_changed=1
+            [[ "$file" == "docs/reference/cli.md" || "$file" == "docs/reference/configuration.md" || "$file" == "prek.schema.json" ]] && generated_from_code_changed=1
+            [[ "$file" =~ ^docs/ || "$file" == "mkdocs.yml" || "$file" == "pyproject.toml" || "$file" == "uv.lock" ]] && docs_related_changed=1
             [[ "$file" =~ ^\.github/workflows/.*\.ya?ml$ ]] && workflow_changed=1
             [[ "$file" == ".github/workflows/ci.yml" ]] && ci_workflow_changed=1
-            [[ "$file" == ".github/workflows/build-release-binaries.yml" || "$file" == ".github/workflows/release.yml" ]] && release_workflow_changed=1
+            [[ "$file" == ".github/workflows/build-release-binaries.yml" ]] && release_binaries_workflow_changed=1
             [[ "$file" == "dist-workspace.toml" ]] && release_config_changed=1
             [[ "$file" == ".github/zizmor.yml" ]] && zizmor_config_changed=1
             [[ "$file" == "Dockerfile" ]] && dockerfile_changed=1
@@ -95,13 +98,14 @@ jobs:
           [[ $rust_code_changed || $rust_deps_changed || $rust_config_changed ]] && any_rust_changed=1
           [[ $rust_deps_changed || $rust_config_changed || $workflow_changed ]] && cache_relevant_changed=1
           [[ $bench_workflow_changed || $bench_scripts_changed ]] && bench_related_changed=1
-          [[ $python_config_changed || $rust_deps_changed || $rust_config_changed || $release_workflow_changed || $release_config_changed || $ci_workflow_changed ]] && release_build_changed=1
-          [[ $python_config_changed || $rust_deps_changed || $rust_config_changed || $release_config_changed || $dockerfile_changed || $docker_workflow_changed || $ci_workflow_changed ]] && docker_build_changed=1
+          [[ $pyproject_changed || $release_binaries_workflow_changed ]] && release_build_changed=1
+          [[ $rust_deps_changed || $rust_config_changed || $dockerfile_changed || $docker_workflow_changed ]] && docker_build_changed=1
 
-          [[ ! $has_skip_label && ($any_code_changed || $on_master_branch) ]] && test_code=1
+          [[ ! $has_skip_label && ($any_code_changed || $generated_from_code_changed || $on_master_branch) ]] && test_code=1
           [[ $on_master_branch || $cache_relevant_changed ]] && save_rust_cache=1
           [[ ! $has_skip_label && ($any_rust_changed || $bench_related_changed || $on_master_branch) ]] && run_bench=1
           [[ ! $has_skip_label && ($workflow_changed || $zizmor_config_changed || $on_master_branch) ]] && run_zizmor=1
+          [[ ! $has_skip_label && ($docs_related_changed || $on_master_branch) ]] && check_docs=1
           [[ ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_release_label && ($release_build_changed || $has_build_release_label) ]] && build_release_binaries=1
           [[ ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_docker_label && $docker_build_changed ]] && build_docker=1
 
@@ -111,6 +115,7 @@ jobs:
             out save_rust_cache        "$save_rust_cache"
             out run_bench              "$run_bench"
             out run_zizmor             "$run_zizmor"
+            out check_docs             "$check_docs"
             out build_release_binaries "$build_release_binaries"
             out build_docker           "$build_docker"
           } >> "${GITHUB_OUTPUT}"
@@ -159,12 +164,40 @@ jobs:
           cat plan-dist-manifest.json
 
   check-zizmor:
+    name: Run zizmor
     needs: plan
     if: ${{ needs.plan.outputs.run-zizmor == 'true' }}
-    uses: ./.github/workflows/zizmor.yml
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
+
+  check-docs:
+    needs: plan
+    if: ${{ needs.plan.outputs.check-docs == 'true' }}
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Build documentation
+        run: |
+          uv run --group docs zensical build
+          uv run --group docs llmstxt-standalone build
 
   build-release-binaries:
     needs: plan
@@ -249,7 +282,7 @@ jobs:
         with:
           persist-credentials: false
       - name: "Install cargo shear"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -273,12 +306,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-llvm-cov
 
@@ -337,12 +370,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-llvm-cov
 
@@ -403,12 +436,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-llvm-cov
 
@@ -476,12 +509,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2.75.18
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
         with:
           tool: cargo-llvm-cov
 
@@ -531,7 +564,7 @@ jobs:
 
       - name: "Install Ruby"
         if: ${{ contains(format(' {0} ', matrix.languages), ' ruby ') }}
-        uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a # v1.302.0
+        uses: ruby/setup-ruby@c4e5b1316158f92e3d49443a9d58b31d25ac0f8f # v1.306.0
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
 
@@ -549,7 +582,7 @@ jobs:
 
       - name: "Install Dart"
         if: ${{ contains(format(' {0} ', matrix.languages), ' dart ') }}
-        uses: dart-lang/setup-dart@0a8a0fc875eb934c15d08629302413c671d3f672 # v1.6.5
+        uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
         with:
           sdk: ${{ env.DART_VERSION }}
 
@@ -562,7 +595,7 @@ jobs:
 
       - name: "Install Julia"
         if: ${{ contains(format(' {0} ', matrix.languages), ' julia ') }}
-        uses: julia-actions/setup-julia@4a12c5f801ca5ef0458bba44687563ef276522dd # v3.0.0
+        uses: julia-actions/setup-julia@f6f565d9f7cf12f53dc8045742460d6260ad3b39 # v3.0.1
         with:
           version: ${{ env.JULIA_VERSION }}
 
@@ -665,6 +698,7 @@ jobs:
       - lint
       - check-release
       - check-zizmor
+      - check-docs
       - cargo-clippy-linux
       - cargo-clippy-windows
       - cargo-shear
