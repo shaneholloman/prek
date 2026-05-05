@@ -24,6 +24,43 @@ Both formats are first-class and will be supported long-term. They describe the 
           - id: trailing-whitespace
     ```
 
+## Global configuration
+
+`prek` also reads an optional user-level global config from the platform config directory:
+
+- Linux and macOS: `~/.config/prek/prek.toml` (or `$XDG_CONFIG_HOME/prek/prek.toml` when `XDG_CONFIG_HOME` is set)
+- Windows: `%APPDATA%\prek\prek.toml`
+
+This file is for user-level `prek` settings, not hook definitions. Project hooks still live in the project config files described below.
+
+The first supported global setting is the default cooldown for `prek auto-update`:
+
+```toml
+[auto_update]
+cooldown_days = 7
+```
+
+Project config can also define the same setting, scoped to that project:
+
+=== "prek.toml"
+
+    ```toml
+    [auto_update]
+    cooldown_days = 7
+    ```
+
+=== ".pre-commit-config.yaml"
+
+    ```yaml
+    auto_update:
+      cooldown_days: 7
+    ```
+
+`prek auto-update --cooldown-days <DAYS>` overrides both project and global config for a single command invocation.
+The cooldown value must be between `0` and `255` days, inclusive; `0` disables the cooldown check.
+
+In workspace mode, project-level `auto_update` settings are not inherited by nested projects. The setting only affects the project config file that defines it; sub-projects use their own `auto_update` setting, then the user-level global config, then the default.
+
 ## Pre-commit compatibility
 
 `prek` is **fully compatible** with [`pre-commit`](https://pre-commit.com/) YAML configs, so your existing `.pre-commit-config.yaml` files work unchanged.
@@ -40,6 +77,7 @@ These entries are implemented by `prek` and are not part of the documented upstr
 They work in both YAML and TOML, but they only matter for compatibility if you share a YAML config with upstream `pre-commit`.
 
 - Top-level:
+    - [`auto_update.cooldown_days`](reference/configuration.md#auto_updatecooldown_days)
     - [`minimum_prek_version`](reference/configuration.md#prek-only-minimum-prek-version-config)
     - [`orphan`](reference/configuration.md#prek-only-orphan)
 - Repo type:
