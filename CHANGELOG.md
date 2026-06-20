@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.4.5
+
+Released on 2026-06-15.
+
+### ✨Highlights
+
+0.4.5 completes `prek`'s pre-commit language coverage. With R, Conda, Perl,
+and coursier now supported, `prek` supports every language available in
+pre-commit, plus `prek`-only modern languages such as Bun and Deno.
+
+This is full feature parity with pre-commit. The last major compatibility gap
+is closed, and `prek` is now on the path to 1.0.
+
+### 💚 Sponsorship
+
+If `prek` saves time for you or your team, please consider sponsoring the
+project on [GitHub Sponsors](https://github.com/sponsors/j178). It helps keep
+new features, performance work, and maintenance moving.
+
+### Enhancements
+
+- Add `Perl` language support ([#2201](https://github.com/j178/prek/pull/2201))
+- Add `R` language support ([#2206](https://github.com/j178/prek/pull/2206))
+- Add `Conda` language support ([#2203](https://github.com/j178/prek/pull/2203))
+- Add `coursier` language support ([#2194](https://github.com/j178/prek/pull/2194))
+- Add group filters to list ([#2152](https://github.com/j178/prek/pull/2152))
+- Remove legacy repo path support ([#2150](https://github.com/j178/prek/pull/2150))
+- Skip cloning fully filtered remote repos ([#2151](https://github.com/j178/prek/pull/2151))
+
+### Performance
+
+- Avoid building JSON trees in syntax hooks ([#2156](https://github.com/j178/prek/pull/2156))
+- Scan mixed line endings without line vector ([#2160](https://github.com/j178/prek/pull/2160))
+- Skip file scan for always-run no-filename hooks ([#2155](https://github.com/j178/prek/pull/2155))
+- Use fixed buffer for EOF scan ([#2163](https://github.com/j178/prek/pull/2163))
+- Use fixed buffer for private key scan ([#2164](https://github.com/j178/prek/pull/2164))
+
+### Bug fixes
+
+- Fix pretty-format-json CRLF handling ([#2210](https://github.com/j178/prek/pull/2210))
+- Handle missing blobs in diff snapshots ([#2211](https://github.com/j178/prek/pull/2211))
+- Ignore coursier channel from working repo ([#2202](https://github.com/j178/prek/pull/2202))
+
+### Contributors
+
+- @j178
+
+## 0.4.4
+
+Released on 2026-06-04.
+
+### Highlights
+
+0.4.4 makes `prek run` easier to watch and easier to slice.
+
+Hook stream output now shows a small live preview under the running hook in the
+progress UI. Long-running hooks no longer look stuck while they are producing
+logs, and failed hooks are easier to diagnose because recent output is already
+visible before the final result.
+
+The new group selector lets a single config support different workflows. Tag
+hooks with `groups`, then select or exclude those groups at run time:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: format
+        name: Format Python
+        language: system
+        entry: ruff format
+        groups: [format, ci]
+
+      - id: lint
+        name: Lint Python
+        language: system
+        entry: ruff check
+        groups: [lint, ci]
+```
+
+```bash
+prek run --all-files --group ci
+prek run --all-files --no-group format
+```
+
+This is useful when local development, CI, slow validation, or project-specific
+checks need different hook sets without splitting the config.
+
+### Enhancements
+
+- Add hook group filters to `prek run` ([#2141](https://github.com/j178/prek/pull/2141))
+- Delay hook output preview rendering ([#2140](https://github.com/j178/prek/pull/2140))
+- Stream hook output in progress UI ([#2136](https://github.com/j178/prek/pull/2136))
+
+### Bug fixes
+
+- Fix intent-to-add stash restore ([#2143](https://github.com/j178/prek/pull/2143))
+
+### Documentation
+
+- Document hook stage file input ([#2147](https://github.com/j178/prek/pull/2147))
+
+### Contributors
+
+- @j178
+
 ## 0.4.3
 
 Released on 2026-05-27.

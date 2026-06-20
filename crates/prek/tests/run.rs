@@ -6,7 +6,9 @@ use assert_fs::prelude::*;
 use insta::assert_snapshot;
 use predicates::prelude::predicate;
 use prek_consts::env_vars::EnvVars;
-use prek_consts::{PRE_COMMIT_CONFIG_YAML, PRE_COMMIT_CONFIG_YML, PREK_TOML};
+use prek_consts::{
+    PRE_COMMIT_CONFIG_YAML, PRE_COMMIT_CONFIG_YML, PRE_COMMIT_HOOKS_YAML, PREK_TOML,
+};
 
 use crate::common::{TestContext, cmd_snapshot, git_cmd};
 
@@ -504,6 +506,284 @@ fn priorities_respected() {
     Early Hook...............................................................Passed
     Middle Hook..............................................................Passed
     Late Hook................................................................Passed
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
+fn run_group_without_stage_selects_hooks_across_stages() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: ci-files
+                name: CI Files
+                language: system
+                entry: python3 -c "print('ci-files')"
+                always_run: true
+                stages: [pre-commit]
+                groups: [ci]
+              - id: ci-check
+                name: CI Check
+                language: system
+                entry: python3 -c "print('ci')"
+                always_run: true
+                stages: [pre-push]
+                groups: [ci]
+              - id: commit-msg-check
+                name: Commit Msg Check
+                language: system
+                entry: python3 -c "raise SystemExit('commit-msg hook should not run')"
+                always_run: true
+                stages: [commit-msg]
+                groups: [ci]
+              - id: prepare-commit-msg-check
+                name: Prepare Commit Msg Check
+                language: system
+                entry: python3 -c "raise SystemExit('prepare-commit-msg hook should not run')"
+                always_run: true
+                stages: [prepare-commit-msg]
+                groups: [ci]
+              - id: local-check
+                name: Local Check
+                language: system
+                entry: python3 -c "print('local')"
+                always_run: true
+                stages: [pre-commit]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("ci"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    CI Files.................................................................Passed
+    CI Check.................................................................Passed
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
+fn run_group_without_stage_warns_when_only_message_file_hooks_match() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: commit-msg-check
+                name: Commit Msg Check
+                language: system
+                entry: python3 -c "print('commit-msg')"
+                always_run: true
+                stages: [commit-msg]
+                groups: [ci]
+              - id: prepare-commit-msg-check
+                name: Prepare Commit Msg Check
+                language: system
+                entry: python3 -c "print('prepare-commit-msg')"
+                always_run: true
+                stages: [prepare-commit-msg]
+                groups: [ci]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("ci"), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: all hooks selected by group filters require `commit-msg` or `prepare-commit-msg` stage and were not run; pass `--stage commit-msg` or `--stage prepare-commit-msg` to run them
+    "#);
+}
+
+#[test]
+fn run_no_group_excludes_matching_hooks_and_keeps_ungrouped_hooks() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: format
+                name: Format
+                language: system
+                entry: python3 -c "print('format')"
+                always_run: true
+                groups: [format]
+              - id: lint
+                name: Lint
+                language: system
+                entry: python3 -c "print('lint')"
+                always_run: true
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--no-group").arg("format"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Lint.....................................................................Passed
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
+fn run_group_exclusion_wins_over_inclusion() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: fast-lint
+                name: Fast Lint
+                language: system
+                entry: python3 -c "print('fast')"
+                always_run: true
+                groups: [ci]
+              - id: slow-lint
+                name: Slow Lint
+                language: system
+                entry: python3 -c "print('slow')"
+                always_run: true
+                groups: [ci, slow]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("ci").arg("--no-group").arg("slow"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Fast Lint................................................................Passed
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
+fn run_unknown_group_warns_and_empty_selection_fails() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: lint
+                name: Lint
+                language: system
+                entry: python3 -c "print('lint')"
+                always_run: true
+                groups: [ci]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("missing"), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: group selector `--group=missing` did not match any hooks
+    error: No hooks found after filtering with the given selectors
+    "#);
+}
+
+#[test]
+fn run_group_selectors_reject_whitespace() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: lint
+                name: Lint
+                language: system
+                entry: python3 -c "print('lint')"
+                always_run: true
+                groups: [ci]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("ci slow"), @r#"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Invalid group selector: `--group=ci slow`
+      caused by: group name cannot contain whitespace
+    "#);
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--no-group").arg("ci slow"), @r#"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Invalid group selector: `--no-group=ci slow`
+      caused by: group name cannot contain whitespace
+    "#);
+}
+
+#[test]
+fn run_group_and_stage_filters_intersect() {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: ci-push
+                name: CI Push
+                language: system
+                entry: python3 -c "print('ci-push')"
+                always_run: true
+                stages: [pre-push]
+                groups: [ci]
+              - id: ci-manual
+                name: CI Manual
+                language: system
+                entry: python3 -c "print('ci-manual')"
+                always_run: true
+                stages: [manual]
+                groups: [ci]
+              - id: other-push
+                name: Other Push
+                language: system
+                entry: python3 -c "print('other-push')"
+                always_run: true
+                stages: [pre-push]
+                groups: [other]
+    "#});
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run().arg("--all-files").arg("--group").arg("ci").arg("--stage").arg("pre-push"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    CI Push..................................................................Passed
 
     ----- stderr -----
     "#);
@@ -1335,33 +1615,37 @@ fn global_path_options_expand_tilde() -> Result<()> {
         show_settings: true,
     }
     RunArgs {
-        includes: [],
-        skips: [],
-        all_files: false,
-        files: [],
-        directory: [],
-        from_ref: None,
-        to_ref: None,
-        last_commit: false,
-        stage: None,
-        show_diff_on_failure: false,
-        fail_fast: false,
-        no_fail_fast: false,
-        dry_run: false,
-        extra: RunExtraArgs {
-            remote_branch: None,
-            local_branch: None,
-            pre_rebase_upstream: None,
-            pre_rebase_branch: None,
-            commit_msg_filename: None,
-            prepare_commit_message_source: None,
-            commit_object_name: None,
-            remote_name: None,
-            remote_url: None,
-            checkout_type: None,
-            is_squash_merge: false,
-            rewrite_command: None,
+        options: RunOptions {
+            includes: [],
+            skips: [],
+            all_files: false,
+            files: [],
+            directory: [],
+            from_ref: None,
+            to_ref: None,
+            last_commit: false,
+            show_diff_on_failure: false,
+            fail_fast: false,
+            no_fail_fast: false,
+            dry_run: false,
+            extra: RunExtraArgs {
+                remote_branch: None,
+                local_branch: None,
+                pre_rebase_upstream: None,
+                pre_rebase_branch: None,
+                commit_msg_filename: None,
+                prepare_commit_message_source: None,
+                commit_object_name: None,
+                remote_name: None,
+                remote_url: None,
+                checkout_type: None,
+                is_squash_merge: false,
+                rewrite_command: None,
+            },
         },
+        stage: None,
+        groups: [],
+        no_groups: [],
     }
 
     ----- stderr -----
@@ -1487,6 +1771,72 @@ fn staged_files_only() -> Result<()> {
 
     let content = context.read("file.txt");
     assert_snapshot!(content, @"Hello world again!");
+
+    Ok(())
+}
+
+#[test]
+fn intent_to_add_file_survives_conflicted_stash_restore() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: rewrite-python
+                name: rewrite-python
+                language: system
+                entry: python3 -c 'open("test.py", "w").write("a = 1\n")'
+                files: ^test\.py$
+   "#});
+
+    let cwd = context.work_dir();
+    context.git_add(PRE_COMMIT_CONFIG_YAML);
+
+    cwd.child("intent.txt").write_str("preserve me\n")?;
+    git_cmd(cwd)
+        .arg("add")
+        .arg("--intent-to-add")
+        .arg("intent.txt")
+        .assert()
+        .success();
+
+    cwd.child("test.py").write_str("a=1\n")?;
+    context.git_add("test.py");
+    cwd.child("test.py").write_str("a=1\nb = 2\n")?;
+
+    let filters: Vec<_> = context
+        .filters()
+        .into_iter()
+        .chain([(r"/\d+-\d+.patch", "/[TIME]-[PID].patch")])
+        .collect();
+
+    cmd_snapshot!(filters, context.run(), @r"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    rewrite-python...........................................................Failed
+    - hook id: rewrite-python
+    - files were modified by this hook
+
+    ----- stderr -----
+    Unstaged changes detected, stashing unstaged changes to `[HOME]/patches/[TIME]-[PID].patch`
+    Stashed changes conflicted with changes made by hook, rolling back the hook changes
+    Restored working tree changes from `[HOME]/patches/[TIME]-[PID].patch`
+    ");
+
+    assert_eq!(context.read("intent.txt"), "preserve me\n");
+    assert_eq!(context.read("test.py"), "a=1\nb = 2\n");
+
+    let output = git_cmd(cwd)
+        .arg("diff")
+        .arg("--diff-filter=A")
+        .arg("--name-only")
+        .arg("--")
+        .arg("intent.txt")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout)?, "intent.txt\n");
 
     Ok(())
 }
@@ -1698,11 +2048,12 @@ fn init_nonexistent_repo() {
     let filters = context
         .filters()
         .into_iter()
-        .chain([(r"exit code: ", "exit status: "),
+        .chain([
+            (r"exit code: ", "exit status: "),
             // Normalize Git error message to handle environment-specific variations
             (
                 r"fatal: unable to access 'https://notexistentatallnevergonnahappen\.com/nonexistent/repo/':.*",
-                r"fatal: unable to access 'https://notexistentatallnevergonnahappen.com/nonexistent/repo/': [error]"
+                r"fatal: unable to access 'https://notexistentatallnevergonnahappen.com/nonexistent/repo/': [error]",
             ),
         ])
         .collect::<Vec<_>>();
@@ -1723,6 +2074,184 @@ fn init_nonexistent_repo() {
     [stderr]
     fatal: unable to access 'https://notexistentatallnevergonnahappen.com/nonexistent/repo/': [error]
     ");
+}
+
+#[test]
+fn skipped_remote_repo_is_not_cloned() {
+    let context = TestContext::new();
+    context.init_project();
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: end-of-file-fixer
+
+          - repo: https://notexistentatallnevergonnahappen.com/nonexistent/repo
+            rev: v1.0.0
+            hooks:
+              - id: ruff-check
+        "});
+    context.git_add(".");
+
+    cmd_snapshot!(
+        context.filters(),
+        context.run().arg("--all-files").arg("--skip").arg("ruff-check"),
+        @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    fix end of files.........................................................Passed
+
+    ----- stderr -----
+    "
+    );
+}
+
+#[test]
+fn skipped_same_key_remote_repo_entry_is_not_initialized() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    let hook_repo = context.home_dir().child("duplicate-key-hook-repo");
+    hook_repo.create_dir_all()?;
+
+    git_cmd(&hook_repo)
+        .arg("-c")
+        .arg("init.defaultBranch=master")
+        .arg("init")
+        .assert()
+        .success();
+
+    hook_repo
+        .child(PRE_COMMIT_HOOKS_YAML)
+        .write_str(indoc::indoc! {r"
+        - id: test-hook
+          name: Test Hook
+          entry: echo ok
+          language: system
+          always_run: true
+    "})?;
+
+    git_cmd(&hook_repo).arg("add").arg(".").assert().success();
+    git_cmd(&hook_repo)
+        .arg("commit")
+        .arg("-m")
+        .arg("Initial commit")
+        .assert()
+        .success();
+    git_cmd(&hook_repo)
+        .arg("tag")
+        .arg("v1.0.0")
+        .assert()
+        .success();
+
+    context.write_pre_commit_config(&indoc::formatdoc! {r"
+        repos:
+          - repo: {repo}
+            rev: v1.0.0
+            hooks:
+              - id: missing-hook
+
+          - repo: {repo}
+            rev: v1.0.0
+            hooks:
+              - id: test-hook
+    ", repo = hook_repo.display()});
+    context.git_add(".");
+
+    context
+        .run()
+        .arg("--all-files")
+        .arg("--skip")
+        .arg("missing-hook")
+        .assert()
+        .success();
+
+    Ok(())
+}
+
+#[test]
+fn group_excluded_remote_repo_is_not_cloned() {
+    let context = TestContext::new();
+    context.init_project();
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: end-of-file-fixer
+                groups: [ci]
+
+          - repo: https://notexistentatallnevergonnahappen.com/nonexistent/repo
+            rev: v1.0.0
+            hooks:
+              - id: ruff-check
+                groups: [local]
+        "});
+    context.git_add(".");
+
+    cmd_snapshot!(
+        context.filters(),
+        context.run().arg("--all-files").arg("--group").arg("ci"),
+        @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    fix end of files.........................................................Passed
+
+    ----- stderr -----
+    "
+    );
+}
+
+#[test]
+fn unmatched_skip_does_not_suppress_remote_clone() {
+    let context = TestContext::new();
+    context.init_project();
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: end-of-file-fixer
+
+          - repo: https://notexistentatallnevergonnahappen.com/nonexistent/repo
+            rev: v1.0.0
+            hooks:
+              - id: ruff-check
+        "});
+    context.git_add(".");
+
+    let filters = context
+        .filters()
+        .into_iter()
+        .chain([(r"exit code: ", "exit status: "),
+            // Normalize Git error message to handle environment-specific variations
+            (
+                r"fatal: unable to access 'https://notexistentatallnevergonnahappen\.com/nonexistent/repo/':.*",
+                r"fatal: unable to access 'https://notexistentatallnevergonnahappen.com/nonexistent/repo/': [error]"
+            ),
+        ])
+        .collect::<Vec<_>>();
+
+    cmd_snapshot!(
+        filters,
+        context.run().arg("--all-files").arg("--skip").arg("other-hook"),
+        @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to init hooks
+      caused by: Failed to clone repo `https://notexistentatallnevergonnahappen.com/nonexistent/repo`
+      caused by: Command `git full clone` exited with an error:
+
+    [status]
+    exit status: 128
+
+    [stderr]
+    fatal: unable to access 'https://notexistentatallnevergonnahappen.com/nonexistent/repo/': [error]
+    "
+    );
 }
 
 /// Test hooks that specifies `types: [directory]`.
@@ -2295,15 +2824,16 @@ fn git_commit_a_currently_fails_when_hook_writes_to_temp_git_index() -> Result<(
     let context = TestContext::new();
     context.init_project();
 
-    // Repro for #1786 documenting the current behavior.
-    // `git commit -a` exports `GIT_INDEX_FILE=.git/index.lock` to the pre-commit hook
-    // process. If the hook inherits that env var and then runs a git command that writes
-    // to an index in a different repository, Git will write those entries into the parent
-    // repo's temporary index instead.
+    // Repro for #1786 documenting the current behavior. `git commit -a`
+    // exports `GIT_INDEX_FILE=.git/index.lock` to the hook process. If the
+    // hook inherits that env var and then runs a git command that writes to an
+    // index in a different repository, Git writes those entries into the
+    // parent repo's temporary index instead.
     //
     // The important detail is that the temp repo stages `file.txt`, matching a tracked
-    // path in the parent repo. That makes prek's post-hook `git diff` read the corrupted
-    // parent index entry and fail with `fatal: unable to read <hash>`.
+    // path in the parent repo. `prek` treats the post-hook diff as a best-effort
+    // snapshot, so the commit continues until Git tries to build trees from the
+    // corrupted temporary index and fails with `invalid object ... for 'file.txt'`.
     context
         .work_dir()
         .child("hook.sh")
@@ -2364,8 +2894,8 @@ fn git_commit_a_currently_fails_when_hook_writes_to_temp_git_index() -> Result<(
         .chain([
             (r"\[master \w{7}\]", r"[master COMMIT]"),
             (
-                r"fatal: unable to read [0-9a-f]{40}",
-                "fatal: unable to read [HASH]",
+                r"invalid object 100644 [0-9a-f]{40}",
+                "invalid object 100644 [HASH]",
             ),
         ])
         .collect::<Vec<_>>();
@@ -2376,13 +2906,11 @@ fn git_commit_a_currently_fails_when_hook_writes_to_temp_git_index() -> Result<(
     ----- stdout -----
 
     ----- stderr -----
-    error: Command `git diff` exited with an error:
-
-    [status]
-    exit status: 128
-
-    [stderr]
-    fatal: unable to read [HASH]
+    write-temp-index.........................................................Passed
+    - hook id: write-temp-index
+    - duration: [TIME]
+    error: invalid object 100644 [HASH] for 'file.txt'
+    error: Error building trees
     "
     );
 
@@ -2465,10 +2993,12 @@ fn selectors_completion() -> Result<()> {
     --from-ref	The original ref in a `<from_ref>...<to_ref>` diff expression. Files changed in this diff will be run through the hooks
     --to-ref	The destination ref in a `from_ref...to_ref` diff expression. Defaults to `HEAD` if `from_ref` is specified
     --last-commit	Run hooks against the last commit. Equivalent to `--from-ref HEAD~1 --to-ref HEAD`
-    --stage	The stage during which the hook is fired
     --show-diff-on-failure	When hooks fail, run `git diff` directly afterward
     --fail-fast	Stop running hooks after the first failure
     --dry-run	Do not run the hooks, but print the hooks that would have been run
+    --stage	The stage during which the hook is fired
+    --group	Run hooks belonging to the specified group
+    --no-group	Do not run hooks belonging to the specified group
     --config	Path to alternate config file
     --cd	Change to directory before running
     --color	Whether to use color in output

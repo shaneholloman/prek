@@ -18,14 +18,14 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, error, trace};
 use unicode_width::UnicodeWidthStr;
 
-use crate::cli::reporter::{
-    HookInitReporter, HookInstallReporter, HookRunReporter, project_status_marker,
-};
+use crate::cli::reporter::{HookInitReporter, HookInstallReporter};
 use crate::cli::run::diff::DiffTracker;
+use crate::cli::run::filter::{RunInputMode, stage_uses_message_file_input};
+use crate::cli::run::install::{InstallCache, install_hooks};
 use crate::cli::run::keeper::WorkTreeKeeper;
 use crate::cli::run::{
-    CollectOptions, FileTagCache, HookFileFilter, ProjectFiles, RunInput, Selectors,
-    collect_run_input,
+    CollectOptions, FileTagCache, GroupFilters, HookFileFilter, HookRunReporter, ProjectFiles,
+    RunInput, Selectors, collect_run_input, project_status_marker,
 };
 use crate::cli::{ExitStatus, RunExtraArgs};
 use crate::config::{PassFilenames, Stage};
@@ -35,10 +35,8 @@ use crate::hook::{Hook, InstalledHook};
 use crate::printer::Printer;
 use crate::run::{CONCURRENCY, USE_COLOR};
 use crate::store::Store;
-use crate::workspace::{Project, Workspace};
+use crate::workspace::{HookInitFilters, Project, Workspace};
 use crate::{fs, git, hooks, warn_user};
-
-use super::install::{InstallCache, install_hooks};
 
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) async fn run(
@@ -46,6 +44,8 @@ pub(crate) async fn run(
     config: Option<PathBuf>,
     includes: Vec<String>,
     skips: Vec<String>,
+    groups: Vec<String>,
+    no_groups: Vec<String>,
     hook_stage: Option<Stage>,
     from_ref: Option<String>,
     to_ref: Option<String>,
@@ -87,8 +87,9 @@ pub(crate) async fn run(
 
     let workspace_root = Workspace::find_root(config.as_deref(), &CWD)?;
     let selectors = Selectors::load(&includes, &skips, &workspace_root)?;
-    let mut workspace =
-        Workspace::discover(store, workspace_root, config, Some(&selectors), refresh)?;
+    let group_filters = GroupFilters::parse(&groups, &no_groups)?;
+    let has_group_filters = group_filters.has_filters();
+    let workspace = Workspace::discover(store, workspace_root, config, Some(&selectors), refresh)?;
 
     if should_stash {
         workspace.check_configs_staged().await?;
@@ -97,20 +98,31 @@ pub(crate) async fn run(
     let reporter = HookInitReporter::new(printer);
     let hooks = {
         let _lock = store.lock_async().await?;
-        store.track_configs(workspace.projects().iter().map(|p| p.config_file()))?;
+        store.track_configs(
+            workspace
+                .projects()
+                .iter()
+                .map(|project| project.config_file()),
+        )?;
 
         workspace
-            .init_hooks(store, Some(&reporter))
+            .init_hooks(
+                store,
+                HookInitFilters::new(Some(&selectors), Some(&group_filters)),
+                Some(&reporter),
+            )
             .await
             .context("Failed to init hooks")?
     };
     let selected_hooks: Vec<_> = hooks
         .into_iter()
         .filter(|h| selectors.matches_hook(h))
+        .filter(|h| group_filters.matches_hook(h))
         .map(Arc::new)
         .collect();
 
     selectors.report_unused();
+    group_filters.report_unused();
 
     if selected_hooks.is_empty() {
         writeln!(
@@ -131,38 +143,32 @@ pub(crate) async fn run(
         return Ok(ExitStatus::Failure);
     }
 
-    let (filtered_hooks, hook_stage) = if let Some(hook_stage) = hook_stage {
-        let hooks = selected_hooks
+    let (stage_filter, input_mode) =
+        infer_stage_and_input_mode(hook_stage, has_group_filters, &selected_hooks, &selectors);
+    let filtered_hooks: Vec<Arc<Hook>> = if let Some(stage_filter) = stage_filter {
+        selected_hooks
             .iter()
-            .filter(|h| h.stages.contains(hook_stage))
+            .filter(|h| h.stages.contains(stage_filter))
             .cloned()
-            .collect::<Vec<_>>();
-        (hooks, hook_stage)
+            .collect()
     } else {
-        // Try filtering by `pre-commit` stage first.
-        let mut hook_stage = Stage::PreCommit;
-        let mut hooks = selected_hooks
-            .iter()
-            .filter(|h| h.stages.contains(Stage::PreCommit))
-            .cloned()
-            .collect::<Vec<_>>();
-        if hooks.is_empty() && selectors.includes_only_hook_targets() {
-            // If no hooks found for `pre-commit` stage, try fallback to `manual` stage for hooks specified directly.
-            hook_stage = Stage::Manual;
-            hooks = selected_hooks
-                .iter()
-                .filter(|h| h.stages.contains(Stage::Manual))
-                .cloned()
-                .collect();
-        }
-        (hooks, hook_stage)
+        // Group selection without an explicit stage uses normal file input, so
+        // hooks that can only consume Git message files cannot run correctly.
+        selected_hooks
+            .into_iter()
+            .filter(|hook| !uses_only_message_file_input(hook))
+            .collect()
     };
 
     if filtered_hooks.is_empty() {
-        debug!(
-            stage = %hook_stage,
-            "No hooks found for stage after filtering, exit early"
-        );
+        if let Some(stage) = stage_filter {
+            debug!("No hooks found for stage {stage} after filtering, exit early");
+        } else {
+            warn_user!(
+                "all hooks selected by group filters require `commit-msg` or `prepare-commit-msg` stage and were not run; pass `--stage commit-msg` or `--stage prepare-commit-msg` to run them"
+            );
+            return Ok(ExitStatus::Failure);
+        }
         return Ok(ExitStatus::Success);
     }
 
@@ -186,7 +192,7 @@ pub(crate) async fn run(
     let input = collect_run_input(
         workspace.root(),
         CollectOptions {
-            hook_stage,
+            input_mode,
             from_ref,
             to_ref,
             all_files,
@@ -235,6 +241,38 @@ pub(crate) async fn run(
         printer,
     )
     .await
+}
+
+fn infer_stage_and_input_mode(
+    explicit_stage: Option<Stage>,
+    has_group_filters: bool,
+    selected_hooks: &[Arc<Hook>],
+    selectors: &Selectors,
+) -> (Option<Stage>, RunInputMode) {
+    if let Some(stage) = explicit_stage {
+        return (Some(stage), RunInputMode::from(stage));
+    }
+
+    if has_group_filters {
+        return (None, RunInputMode::Files);
+    }
+
+    // Preserve legacy direct-hook execution: try `manual` only when the user
+    // named hooks directly and none of those hooks can run as `pre-commit`.
+    let stage = if selectors.includes_only_hook_targets()
+        && !selected_hooks
+            .iter()
+            .any(|hook| hook.stages.contains(Stage::PreCommit))
+    {
+        Stage::Manual
+    } else {
+        Stage::PreCommit
+    };
+    (Some(stage), RunInputMode::from(stage))
+}
+
+fn uses_only_message_file_input(hook: &Hook) -> bool {
+    !hook.stages.is_empty() && hook.stages.iter().all(stage_uses_message_file_input)
 }
 
 // `pre-commit` sets these environment variables for other git hooks.
@@ -378,7 +416,7 @@ fn select_hooks_to_install<'paths>(
         match input {
             RunInput::Files(files) => {
                 let mut project_consumed_files = FxHashSet::default();
-                let Some(hooks) = project_to_hooks.remove(project) else {
+                let Some(hooks) = project_to_hooks.remove(project.as_ref()) else {
                     ProjectFiles::consume_for_project(
                         files.iter(),
                         project,
@@ -391,7 +429,6 @@ fn select_hooks_to_install<'paths>(
 
                 let mut candidates = hooks
                     .into_iter()
-                    .filter(|hook| hook.language.supported())
                     .map(|hook| {
                         let matches = hook.always_run;
                         (hook, matches)
@@ -433,12 +470,12 @@ fn select_hooks_to_install<'paths>(
                 }
             }
             RunInput::MessageFile(_) => {
-                let Some(hooks) = project_to_hooks.remove(project) else {
+                let Some(hooks) = project_to_hooks.remove(project.as_ref()) else {
                     continue;
                 };
 
                 let project_input = ProjectHookInput::new(input, project, None, None)?;
-                for hook in hooks.into_iter().filter(|hook| hook.language.supported()) {
+                for hook in hooks {
                     if hook.always_run || project_input.matches_hook(&hook, tag_cache) {
                         hooks_to_install.push(hook);
                     }
@@ -500,7 +537,7 @@ async fn run_hooks<'paths>(
         let mut project_runs = Vec::new();
 
         for project in projects {
-            let Some(mut hooks) = project_to_hooks.remove(project) else {
+            let Some(mut hooks) = project_to_hooks.remove(project.as_ref()) else {
                 if let RunInput::Files(files) = input {
                     ProjectFiles::consume_for_project(
                         files.iter(),
@@ -552,18 +589,18 @@ async fn run_hooks<'paths>(
 }
 
 struct ProjectDepthGroups<'a> {
-    projects: &'a [Project],
+    projects: &'a [Arc<Project>],
     idx: usize,
 }
 
 impl<'a> ProjectDepthGroups<'a> {
-    fn new(projects: &'a [Project]) -> Self {
+    fn new(projects: &'a [Arc<Project>]) -> Self {
         Self { projects, idx: 0 }
     }
 }
 
 impl<'a> Iterator for ProjectDepthGroups<'a> {
-    type Item = &'a [Project];
+    type Item = &'a [Arc<Project>];
 
     fn next(&mut self) -> Option<Self::Item> {
         let first = self.projects.get(self.idx)?;
@@ -637,7 +674,6 @@ struct HookRunSession<'a> {
     verbose: bool,
     success: bool,
     file_modified: bool,
-    has_unimplemented: bool,
 }
 
 impl<'a> HookRunSession<'a> {
@@ -662,7 +698,6 @@ impl<'a> HookRunSession<'a> {
             verbose,
             success: true,
             file_modified: false,
-            has_unimplemented: false,
         }
     }
 
@@ -893,8 +928,6 @@ impl<'a> HookRunSession<'a> {
             .suspend(|| self.render_priority_group(&results, modified_files, hook_prefix))?;
 
         for RunResult { status, .. } in &results {
-            self.has_unimplemented |= status.is_unimplemented();
-
             let ok = if modified_files {
                 false
             } else {
@@ -960,7 +993,7 @@ impl<'a> HookRunSession<'a> {
             self.status_printer
                 .write(&result.hook.name, &prefix, status)?;
 
-            if matches!(status, RunStatus::NoFiles | RunStatus::Unimplemented) {
+            if matches!(status, RunStatus::NoFiles) {
                 continue;
             }
 
@@ -1040,13 +1073,6 @@ impl<'a> HookRunSession<'a> {
         show_diff_on_failure: bool,
     ) -> Result<ExitStatus> {
         self.reporter.on_complete();
-
-        if self.has_unimplemented {
-            warn_user!(
-                "Some hooks were skipped because their languages are unimplemented.\nWe're working hard to support more languages. Check out current support status at {}.",
-                "https://prek.j178.dev/languages/".cyan().underline()
-            );
-        }
 
         if !self.success && show_diff_on_failure && self.file_modified {
             if EnvVars::is_under_ci() {
@@ -1169,6 +1195,8 @@ impl<'a> ProjectHookInput<'a> {
     fn run_input_for_hook(&self, hook: &Hook, tag_cache: &FileTagCache<'a>) -> HookRunInput<'a> {
         match self {
             Self::Files(project_files) => match hook.pass_filenames {
+                // Always-run hooks without filename arguments run regardless of file matches.
+                PassFilenames::None if hook.always_run => HookRunInput::without_filenames(true),
                 PassFilenames::None => HookRunInput::without_filenames(
                     project_files.has_matching_file(hook, tag_cache),
                 ),
@@ -1260,23 +1288,15 @@ enum RunStatus {
     Failed,
     DryRun,
     NoFiles,
-    Unimplemented,
 }
 
 impl RunStatus {
     fn as_bool(self) -> bool {
-        matches!(
-            self,
-            Self::Success | Self::NoFiles | Self::DryRun | Self::Unimplemented
-        )
-    }
-
-    fn is_unimplemented(self) -> bool {
-        matches!(self, Self::Unimplemented)
+        matches!(self, Self::Success | Self::NoFiles | Self::DryRun)
     }
 
     fn is_skipped(self) -> bool {
-        matches!(self, Self::DryRun | Self::NoFiles | Self::Unimplemented)
+        matches!(self, Self::DryRun | Self::NoFiles)
     }
 }
 
@@ -1291,7 +1311,6 @@ impl StatusPrinter {
     const SKIPPED: &'static str = "Skipped";
     const DRY_RUN: &'static str = "Dry Run";
     const NO_FILES: &'static str = "(no files to check)";
-    const UNIMPLEMENTED: &'static str = "(unimplemented yet)";
 
     fn for_hooks<T>(hooks: &[T], printer: Printer) -> Self
     where
@@ -1328,11 +1347,6 @@ impl StatusPrinter {
             RunStatus::NoFiles => (
                 Self::NO_FILES,
                 Self::SKIPPED.black().on_cyan().to_string(),
-                Self::SKIPPED.width(),
-            ),
-            RunStatus::Unimplemented => (
-                Self::UNIMPLEMENTED,
-                Self::SKIPPED.black().on_yellow().to_string(),
                 Self::SKIPPED.width(),
             ),
             RunStatus::DryRun => (
@@ -1413,10 +1427,6 @@ async fn run_hook(
     if !matched && !hook.always_run {
         return Ok(RunResult::from_status(hook, RunStatus::NoFiles));
     }
-    if !hook.language.supported() {
-        return Ok(RunResult::from_status(hook, RunStatus::Unimplemented));
-    }
-
     let start = std::time::Instant::now();
     input.shuffle();
 

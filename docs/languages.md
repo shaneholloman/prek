@@ -42,8 +42,6 @@ Below is how prek handles each language (with notes when it differs from pre-com
 
 ### bun
 
-**Status in prek:** ✅ Supported.
-
 prek installs Bun hooks via `bun install` and runs the configured entry. The repository should contain a `package.json`. `entry` should match a provided bin name or be a Bun command. `additional_dependencies` are supported.
 
 Bun hooks run without needing a pre-installed Bun runtime when toolchain download is available.
@@ -65,19 +63,70 @@ Supported formats:
 
 ### conda
 
-**Status in prek:** Not supported yet.
+For remote hooks, prek creates a Conda environment from the hook repository's
+`environment.yml` and runs the configured entry from that environment. For
+`repo: local` hooks, prek creates a minimal Conda environment and installs only
+the hook's `additional_dependencies`.
 
-Tracking: [#52](https://github.com/j178/prek/issues/52)
+By default, prek uses a system-installed `conda` executable. For compatibility
+with pre-commit, setting `PRE_COMMIT_USE_MAMBA` uses `mamba`, and setting
+`PRE_COMMIT_USE_MICROMAMBA` uses `micromamba`.
+
+`additional_dependencies` are installed into the created environment with
+`conda install -p <env> ...` using the selected Conda-compatible executable.
+
+Example:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: conda-hook
+        name: Conda hook
+        language: conda
+        entry: python -c "import colorama; print('ok')"
+        additional_dependencies: [colorama]
+```
+
+#### `language_version`
+
+Conda does not support managed toolchain installation today. The Python or
+package versions should be declared in `environment.yml`; explicit
+`language_version` requests are rejected.
 
 ### coursier
 
-**Status in prek:** Not supported yet.
+prek runs Coursier hooks with a system-installed `cs` or `coursier` executable.
+It does not install Coursier itself or manage JVM toolchains.
 
-Tracking: [#53](https://github.com/j178/prek/issues/53)
+Hooks can provide applications in either of the ways supported by pre-commit:
+
+- A `.pre-commit-channel/` directory in a remote hook repository. Each descriptor
+  file name maps to an app name, and prek installs it with
+  `cs install --default-channels=false --channel .pre-commit-channel <app>`.
+- `additional_dependencies`, passed directly to `cs fetch` and `cs install`.
+
+Example:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: scalafmt
+        name: scalafmt
+        language: coursier
+        entry: scalafmt --version
+        additional_dependencies:
+          - scalafmt:3.6.1
+```
+
+#### `language_version`
+
+Coursier does not support managed toolchain installation today. It uses the
+system `cs` or `coursier` executable, and explicit version requests are
+rejected.
 
 ### dart
-
-**Status in prek:** ✅ Supported.
 
 prek runs Dart hooks with a system-installed `dart` executable.
 
@@ -135,8 +184,6 @@ Dart does not support managed toolchain installation today. It uses the system
 
 ### docker
 
-**Status in prek:** ✅ Supported.
-
 prek expects the hook repository to ship a Dockerfile and builds the image from the repo root with `docker build .`. Hooks run inside the container, and the first token of `entry` is used as the container entrypoint (arguments are passed after it).
 
 Runtime behavior:
@@ -156,8 +203,6 @@ Use `docker` when you need a language runtime that isn’t otherwise supported; 
 
 ### docker_image
 
-**Status in prek:** ✅ Supported.
-
 prek runs hooks from an existing image. The `entry` value is passed to `docker run` directly, so it should include the image reference and can optionally include `--entrypoint` overrides.
 
 Runtime behavior:
@@ -172,8 +217,6 @@ If the image already defines an `ENTRYPOINT`, you can omit `--entrypoint` in `en
     prek uses the same runtime auto-detection as `docker` hooks.
 
 ### dotnet
-
-**Status in prek:** ✅ Supported.
 
 prek supports .NET SDK-based hooks. Hook entries run with a matching `dotnet` on the PATH, and tools specified in `additional_dependencies` are installed into an isolated hook environment via `dotnet tool install --tool-path`.
 
@@ -213,13 +256,9 @@ repos:
 
 ### fail
 
-**Status in prek:** ✅ Supported.
-
 `fail` is a lightweight “forbid files” hook. The `entry` text is printed when the hook fails, followed by the list of matching files, and the hook exits non-zero.
 
 ### golang
-
-**Status in prek:** ✅ Supported.
 
 prek installs with `go install ./...` in an isolated `GOPATH`. The repository should build at least one binary whose name matches the hook `entry`. `additional_dependencies` can be appended and `language_version` selects the Go toolchain.
 
@@ -236,8 +275,6 @@ Pre-release strings (for example `go1.22rc1`) are not supported yet.
 
 ### haskell
 
-**Status in prek:** ✅ Supported.
-
 prek installs Haskell hooks via Cabal and runs the configured entry. Please ensure the repository contains a `.cabal` file or configured `additional_dependencies` for proper dependency management.
 
 #### `language_version`
@@ -247,8 +284,6 @@ prek installs Haskell hooks via Cabal and runs the configured entry. Please ensu
 The hook `entry` should point at an executable installed by `cabal`.
 
 ### julia
-
-**Status in prek:** ✅ Supported.
 
 prek installs Julia hooks into an isolated environment using Julia's built-in package manager (`Pkg`).
 
@@ -264,8 +299,6 @@ The hook `entry` should be a path to a julia source file relative to the hook re
 
 ### lua
 
-**Status in prek:** ✅ Supported.
-
 prek installs Lua hooks via LuaRocks and runs the configured entry. If the repository includes a rockspec, it is installed into the hook environment before running.
 
 #### `language_version`
@@ -275,8 +308,6 @@ Lua does not support `language_version` today. It uses the system `lua` / `luaro
 The hook entry should point at an executable installed by LuaRocks.
 
 ### node
-
-**Status in prek:** ✅ Supported.
 
 prek expects a `package.json` and installs via `npm install .`, exposing executables from the package `bin`. `entry` should match a provided bin name. `additional_dependencies` are supported.
 
@@ -293,13 +324,22 @@ Supported formats:
 
 ### perl
 
-**Status in prek:** Not supported yet.
+prek installs remote Perl hook repositories with the system `cpan` command and
+runs the configured entry from the hook environment. Remote hook repositories
+should be CPAN installable distributions, for example with `Makefile.PL` or
+`Build.PL`. Local Perl hooks skip repository installation and install only
+their `additional_dependencies`, so simple entries such as `perl script.pl` do
+not require the project itself to be a CPAN distribution.
 
-Tracking: [#1447](https://github.com/j178/prek/issues/1447)
+Perl hooks require system-installed `perl` and `cpan`; prek does not download a
+Perl toolchain.
+
+#### `language_version`
+
+Perl does not support managed toolchain installation today. It uses the system
+`perl` executable, and explicit Perl version requests are rejected.
 
 ### python
-
-**Status in prek:** ✅ Supported.
 
 prek installs hook repositories with `uv pip install` and uses the installed console scripts. The repository should be installable via `pip` (for example via `pyproject.toml` or `setup.py`). `additional_dependencies` are appended to the install step.
 
@@ -374,13 +414,26 @@ main()
 
 ### r
 
-**Status in prek:** Not supported yet.
+prek runs R hooks with a system-installed `Rscript` executable. It does not
+download or manage R toolchains.
 
-Tracking: [#42](https://github.com/j178/prek/issues/42)
+Remote R hook repositories should include `renv.lock` and a `renv/` directory.
+prek restores that `renv` project into the hook environment and runs entries
+through that environment. If the remote repository is an R package with a
+`DESCRIPTION` file, prek installs the repository package into the same
+environment.
+
+The hook `entry` must use one of these forms:
+
+- `Rscript -e '<expr>'`
+- `Rscript path/to/script.R`
+
+#### `language_version`
+
+R does not support managed toolchain installation today. It uses the system
+`Rscript` executable, and explicit R version requests are rejected.
 
 ### ruby
-
-**Status in prek:** ✅ Supported.
 
 prek installs gems from a `*.gemspec` and runs executables declared in the gemspec. `additional_dependencies` are installed into the same isolated gemset.
 
@@ -404,8 +457,6 @@ Supported formats:
 Gems specified in hook gemspec files and `additional_dependencies` are installed into an isolated gemset shared across hooks with the same Ruby version and dependencies.
 
 ### rust
-
-**Status in prek:** ✅ Supported.
 
 prek installs binaries via `cargo install --bins --locked` and runs the specified executable. The repository should contain a `Cargo.toml` that produces the binary referenced by `entry`. `additional_dependencies` and `language_version` are supported.
 
@@ -453,8 +504,6 @@ When prek installs a managed Rust toolchain it uses `rustup`'s `minimal` profile
 
 ### swift
 
-**Status in prek:** ✅ Supported.
-
 prek detects the system Swift installation and runs hooks using the configured `entry`. If the hook repository contains a `Package.swift`, prek builds it in release mode and adds the resulting binaries to PATH.
 
 Runtime behavior:
@@ -470,8 +519,6 @@ Swift does not support `language_version` today. It uses the system `swift` inst
 
 ### pygrep
 
-**Status in prek:** ✅ Supported.
-
 prek provides a Python-based grep implementation for file content matching. The `entry` is a Python regex. Supported args:
 
 - `-i` / `--ignore-case`
@@ -481,8 +528,6 @@ prek provides a Python-based grep implementation for file content matching. The 
 Regex matching uses Python’s `re` semantics for compatibility with pre-commit.
 
 ### system
-
-**Status in prek:** ✅ Supported.
 
 `system` runs a system executable without a managed environment. The command is taken from `entry`, and filenames are appended unless `pass_filenames: false` is set. Dependencies must be installed by the user.
 
@@ -494,8 +539,6 @@ Use `system` for tools with special environment requirements that cannot run in 
 
 ### script
 
-**Status in prek:** ✅ Supported.
-
 `script` runs repository-local scripts without a managed environment. For remote hooks, `entry` is resolved relative to the hook repository root; for local hooks, it is resolved relative to the current working directory.
 
 Use `script` for simple repository scripts that only need file paths and no managed environment.
@@ -505,8 +548,6 @@ Use `script` for simple repository scripts that only need file paths and no mana
     `unsupported_script` is accepted as an alias for `script`.
 
 ### deno
-
-**Status in prek:** ✅ Supported.
 
 prek installs each `additional_dependencies` item with `deno install --global` into the hook environment. The hook runs from the work repository with an isolated `DENO_DIR` for cache separation.
 

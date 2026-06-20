@@ -20,7 +20,6 @@
   // Refresh lock files to keep them up-to-date
   lockFileMaintenance: {
     enabled: true,
-    groupName: 'Lock file maintenance',
   },
   semanticCommits: 'disabled',
   // pre-commit is currently in beta testing, must opt in
@@ -130,19 +129,6 @@
         'github-runners'
       ],
       description: "Disable PRs updating GitHub runners (e.g. 'runs-on: macos-14')",
-      enabled: false
-    },
-    // Disable updates for the msvc-dev-cmd action, the latest version does not work.
-    {
-      matchManagers: [
-        "github-actions"
-      ],
-      matchDepTypes: [
-        "action"
-      ],
-      matchDepNames: [
-        "ilammy/msvc-dev-cmd"
-      ],
       enabled: false
     },
     {

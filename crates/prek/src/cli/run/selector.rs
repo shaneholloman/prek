@@ -3,6 +3,7 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::config::validate_group_name;
 use crate::hook::Hook;
 use crate::warn_user;
 
@@ -13,6 +14,30 @@ use rustc_hash::FxHashSet;
 use tracing::trace;
 
 use crate::fs::PathClean;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConfiguredHook<'a> {
+    project_relative_path: &'a Path,
+    id: &'a str,
+    alias: Option<&'a str>,
+    groups: Option<&'a [String]>,
+}
+
+impl<'a> ConfiguredHook<'a> {
+    pub(crate) fn new(
+        project_relative_path: &'a Path,
+        id: &'a str,
+        alias: Option<&'a str>,
+        groups: Option<&'a [String]>,
+    ) -> Self {
+        Self {
+            project_relative_path,
+            id,
+            alias,
+            groups,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -26,6 +51,13 @@ pub(crate) enum Error {
     #[error("Invalid project path: `{path}`")]
     InvalidPath {
         path: String,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("Invalid group selector: `{selector}`")]
+    GroupSelector {
+        selector: String,
         #[source]
         source: anyhow::Error,
     },
@@ -130,13 +162,33 @@ impl Selector {
             }
         }
     }
+
+    fn matches_configured_hook(&self, hook: &ConfiguredHook<'_>) -> bool {
+        let matches_hook_id = |selector: &str| {
+            hook.id == selector || hook.alias.is_some_and(|alias| alias == selector)
+        };
+
+        match &self.expr {
+            SelectorExpr::HookId(selector) => matches_hook_id(selector),
+            SelectorExpr::ProjectPrefix(project_path) => {
+                hook.project_relative_path.starts_with(project_path)
+            }
+            SelectorExpr::ProjectHook {
+                project_path,
+                hook_id: selector_hook_id,
+            } => {
+                project_path.as_path() == hook.project_relative_path
+                    && matches_hook_id(selector_hook_id)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Selectors {
     includes: Vec<Selector>,
     skips: Vec<Selector>,
-    usage: Arc<Mutex<SelectorUsage>>,
+    usage: Arc<Mutex<FilterUsage>>,
 }
 
 impl Selectors {
@@ -221,7 +273,7 @@ impl Selectors {
         let mut skipped = false;
         for (idx, skip) in self.skips.iter().enumerate() {
             if skip.matches_hook(hook) {
-                usage.use_skip(idx);
+                usage.use_exclude(idx);
                 skipped = true;
             }
         }
@@ -243,6 +295,25 @@ impl Selectors {
         included
     }
 
+    /// Return whether skip selectors rule out a hook from config alone.
+    ///
+    /// Include selectors are intentionally not applied here. Remote hook aliases
+    /// can select hooks, but those aliases are only known after cloning the repo.
+    /// A non-matching include selector is therefore not enough to rule out a clone
+    /// in this generic helper.
+    pub(crate) fn excludes_configured_hook(&self, hook: &ConfiguredHook<'_>) -> bool {
+        let mut usage = self.usage.lock().unwrap();
+
+        let mut skipped = false;
+        for (idx, skip) in self.skips.iter().enumerate() {
+            if skip.matches_configured_hook(hook) {
+                usage.use_exclude(idx);
+                skipped = true;
+            }
+        }
+        skipped
+    }
+
     pub(crate) fn matches_hook_id(&self, hook_id: &str) -> bool {
         let mut usage = self.usage.lock().unwrap();
 
@@ -251,7 +322,7 @@ impl Selectors {
         for (idx, skip) in self.skips.iter().enumerate() {
             if let SelectorExpr::HookId(id) = &skip.expr {
                 if id == hook_id {
-                    usage.use_skip(idx);
+                    usage.use_exclude(idx);
                     skipped = true;
                 }
             }
@@ -283,7 +354,7 @@ impl Selectors {
         for (idx, skip) in self.skips.iter().enumerate() {
             if let SelectorExpr::ProjectPrefix(project_path) = &skip.expr {
                 if path.starts_with(project_path) {
-                    usage.use_skip(idx);
+                    usage.use_exclude(idx);
                     skipped = true;
                 }
             }
@@ -319,34 +390,171 @@ impl Selectors {
     }
 }
 
-#[derive(Default, Debug)]
-struct SelectorUsage {
-    used_includes: FxHashSet<usize>,
-    used_skips: FxHashSet<usize>,
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GroupFilters {
+    includes: Vec<String>,
+    excludes: Vec<String>,
+    usage: Arc<Mutex<FilterUsage>>,
 }
 
-impl SelectorUsage {
+impl GroupFilters {
+    pub(crate) fn parse(includes: &[String], excludes: &[String]) -> Result<Self, Error> {
+        let parse_groups = |flag: &'static str, groups: &[String]| {
+            let mut seen = FxHashSet::default();
+            let mut names = Vec::new();
+
+            for group in groups {
+                if let Err(reason) = validate_group_name(group) {
+                    return Err(Error::GroupSelector {
+                        selector: format!("{flag}={group}"),
+                        source: anyhow!("group name {reason}"),
+                    });
+                }
+                if seen.insert(group.as_str()) {
+                    names.push(group.clone());
+                }
+            }
+
+            Ok(names)
+        };
+
+        Ok(Self {
+            includes: parse_groups("--group", includes)?,
+            excludes: parse_groups("--no-group", excludes)?,
+            usage: Arc::default(),
+        })
+    }
+
+    pub(crate) fn has_filters(&self) -> bool {
+        !self.includes.is_empty() || !self.excludes.is_empty()
+    }
+
+    pub(crate) fn matches_hook(&self, hook: &Hook) -> bool {
+        let mut usage = self.usage.lock().unwrap();
+
+        let mut excluded = false;
+        for (idx, exclude) in self.excludes.iter().enumerate() {
+            if hook.groups.contains(exclude) {
+                usage.use_exclude(idx);
+                excluded = true;
+            }
+        }
+
+        if self.includes.is_empty() {
+            return !excluded;
+        }
+
+        let mut included = false;
+        for (idx, include) in self.includes.iter().enumerate() {
+            if hook.groups.contains(include) {
+                usage.use_include(idx);
+                included = true;
+            }
+        }
+
+        included && !excluded
+    }
+
+    pub(crate) fn matches_configured_hook(&self, hook: &ConfiguredHook<'_>) -> bool {
+        let mut usage = self.usage.lock().unwrap();
+        let contains_group = |group: &str| {
+            hook.groups
+                .is_some_and(|groups| groups.iter().any(|hook_group| hook_group == group))
+        };
+
+        let mut excluded = false;
+        for (idx, exclude) in self.excludes.iter().enumerate() {
+            if contains_group(exclude) {
+                usage.use_exclude(idx);
+                excluded = true;
+            }
+        }
+
+        if self.includes.is_empty() {
+            return !excluded;
+        }
+
+        let mut included = false;
+        for (idx, include) in self.includes.iter().enumerate() {
+            if contains_group(include) {
+                usage.use_include(idx);
+                included = true;
+            }
+        }
+
+        included && !excluded
+    }
+
+    pub(crate) fn report_unused(&self) {
+        let usage = self.usage.lock().unwrap();
+        let unused = usage
+            .unused_includes(&self.includes)
+            .map(|(_, group)| format!("--group={group}"))
+            .chain(
+                usage
+                    .unused_excludes(&self.excludes)
+                    .map(|(_, group)| format!("--no-group={group}")),
+            )
+            .collect::<Vec<_>>();
+
+        match unused.as_slice() {
+            [] => {}
+            [group] => {
+                warn_user!("group selector `{group}` did not match any hooks");
+            }
+            _ => {
+                let warning = unused
+                    .iter()
+                    .map(|group| format!("  - `{group}`"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                warn_user!("the following group selectors did not match any hooks:");
+                anstream::eprintln!("{warning}");
+            }
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+struct FilterUsage {
+    used_includes: FxHashSet<usize>,
+    used_excludes: FxHashSet<usize>,
+}
+
+impl FilterUsage {
     fn use_include(&mut self, idx: usize) {
         self.used_includes.insert(idx);
     }
 
-    fn use_skip(&mut self, idx: usize) {
-        self.used_skips.insert(idx);
+    fn use_exclude(&mut self, idx: usize) {
+        self.used_excludes.insert(idx);
     }
 
-    fn report_unused(&self, selectors: &Selectors) {
-        let unused = selectors
-            .includes
+    fn unused_includes<'a, T>(
+        &'a self,
+        values: &'a [T],
+    ) -> impl Iterator<Item = (usize, &'a T)> + 'a {
+        values
             .iter()
             .enumerate()
             .filter(|(idx, _)| !self.used_includes.contains(idx))
-            .chain(
-                selectors
-                    .skips
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| !self.used_skips.contains(idx)),
-            )
+    }
+
+    fn unused_excludes<'a, T>(
+        &'a self,
+        values: &'a [T],
+    ) -> impl Iterator<Item = (usize, &'a T)> + 'a {
+        values
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.used_excludes.contains(idx))
+    }
+
+    fn report_unused(&self, selectors: &Selectors) {
+        let unused = self
+            .unused_includes(&selectors.includes)
+            .chain(self.unused_excludes(&selectors.skips))
             .collect::<Vec<_>>();
 
         match unused.as_slice() {
@@ -748,6 +956,92 @@ mod tests {
         assert_eq!(selector.to_string(), "src:lint:ruff");
 
         Ok(())
+    }
+
+    fn test_selector(expr: SelectorExpr) -> Selector {
+        Selector {
+            source: SelectorSource::CliArg,
+            original: "selector".to_string(),
+            expr,
+        }
+    }
+
+    fn configured_hook(
+        project_relative_path: &'static str,
+        id: &'static str,
+        alias: Option<&'static str>,
+    ) -> ConfiguredHook<'static> {
+        ConfiguredHook::new(Path::new(project_relative_path), id, alias, None)
+    }
+
+    #[test]
+    fn test_selector_matches_configured_hook() {
+        let cases = [
+            (
+                "hook id matches id",
+                test_selector(SelectorExpr::HookId("black".to_string())),
+                configured_hook("src", "black", None),
+                true,
+            ),
+            (
+                "hook id matches config alias",
+                test_selector(SelectorExpr::HookId("black".to_string())),
+                configured_hook("src", "ruff", Some("black")),
+                true,
+            ),
+            (
+                "project prefix matches nested project",
+                test_selector(SelectorExpr::ProjectPrefix(PathBuf::from("src"))),
+                configured_hook("src/backend", "black", None),
+                true,
+            ),
+            (
+                "project prefix rejects other project",
+                test_selector(SelectorExpr::ProjectPrefix(PathBuf::from("src"))),
+                configured_hook("tests", "black", None),
+                false,
+            ),
+            (
+                "project hook matches exact project and id",
+                test_selector(SelectorExpr::ProjectHook {
+                    project_path: PathBuf::from("src"),
+                    hook_id: "black".to_string(),
+                }),
+                configured_hook("src", "black", None),
+                true,
+            ),
+            (
+                "project hook matches exact project and config alias",
+                test_selector(SelectorExpr::ProjectHook {
+                    project_path: PathBuf::from("src"),
+                    hook_id: "black".to_string(),
+                }),
+                configured_hook("src", "ruff", Some("black")),
+                true,
+            ),
+            (
+                "project hook rejects nested project prefix",
+                test_selector(SelectorExpr::ProjectHook {
+                    project_path: PathBuf::from("src"),
+                    hook_id: "black".to_string(),
+                }),
+                configured_hook("src/backend", "black", None),
+                false,
+            ),
+            (
+                "project hook rejects other hook",
+                test_selector(SelectorExpr::ProjectHook {
+                    project_path: PathBuf::from("src"),
+                    hook_id: "black".to_string(),
+                }),
+                configured_hook("src", "ruff", Some("format")),
+                false,
+            ),
+        ];
+
+        for (name, selector, hook, expected) in cases {
+            assert_eq!(selector.matches_configured_hook(&hook), expected, "{name}");
+        }
     }
 
     #[test]

@@ -227,9 +227,13 @@ prek run [OPTIONS] [HOOK|PROJECT]...
 </dd><dt id="prek-run--fail-fast"><a href="#prek-run--fail-fast"><code>--fail-fast</code></a></dt><dd><p>Stop running hooks after the first failure</p>
 </dd><dt id="prek-run--files"><a href="#prek-run--files"><code>--files</code></a> <i>files</i></dt><dd><p>Specific filenames to run hooks on</p>
 </dd><dt id="prek-run--from-ref"><a href="#prek-run--from-ref"><code>--from-ref</code></a>, <code>--source</code>, <code>-s</code> <i>from-ref</i></dt><dd><p>The original ref in a <code>&lt;from_ref&gt;...&lt;to_ref&gt;</code> diff expression. Files changed in this diff will be run through the hooks</p>
+</dd><dt id="prek-run--group"><a href="#prek-run--group"><code>--group</code></a> <i>group</i></dt><dd><p>Run hooks belonging to the specified group.</p>
+<p>Can be specified multiple times.</p>
 </dd><dt id="prek-run--help"><a href="#prek-run--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
 </dd><dt id="prek-run--last-commit"><a href="#prek-run--last-commit"><code>--last-commit</code></a></dt><dd><p>Run hooks against the last commit. Equivalent to <code>--from-ref HEAD~1 --to-ref HEAD</code></p>
 </dd><dt id="prek-run--log-file"><a href="#prek-run--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
+</dd><dt id="prek-run--no-group"><a href="#prek-run--no-group"><code>--no-group</code></a> <i>group</i></dt><dd><p>Do not run hooks belonging to the specified group.</p>
+<p>Can be specified multiple times. Exclusion wins over inclusion.</p>
 </dd><dt id="prek-run--no-progress"><a href="#prek-run--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>
 <p>For example, spinners or progress bars.</p>
 </dd><dt id="prek-run--quiet"><a href="#prek-run--quiet"><code>--quiet</code></a>, <code>-q</code></dt><dd><p>Use quiet output.</p>
@@ -251,7 +255,7 @@ prek run [OPTIONS] [HOOK|PROJECT]...
 </ul>
 <p>Can be specified multiple times. Also accepts <code>PREK_SKIP</code> or <code>SKIP</code> environment variables (comma-delimited).</p>
 </dd><dt id="prek-run--stage"><a href="#prek-run--stage"><code>--stage</code></a>, <code>--hook-stage</code> <i>stage</i></dt><dd><p>The stage during which the hook is fired.</p>
-<p>When specified, only hooks configured for that stage (for example <code>manual</code>, <code>pre-commit</code>, or <code>pre-push</code>) will run. Defaults to <code>pre-commit</code> if not specified. For hooks specified directly in the command line, fallback to <code>manual</code> stage if no hooks found for <code>pre-commit</code> stage.</p>
+<p>When specified, only hooks configured for that stage (for example <code>manual</code>, <code>pre-commit</code>, or <code>pre-push</code>) will run. When not specified and no group filter is active, this command starts with hooks eligible for <code>pre-commit</code>. If no hook is selected and the command named hook IDs, those same IDs are matched again against hooks configured for <code>manual</code>. With <code>--group</code> or <code>--no-group</code>, omitting the stage lets hooks from any configured stage match, using the default file input mode; hooks that only run at <code>commit-msg</code> or <code>prepare-commit-msg</code> are ignored.</p>
 <p>Possible values:</p>
 <ul>
 <li><code>manual</code></li>
@@ -308,6 +312,8 @@ prek list [OPTIONS] [HOOK|PROJECT]...
 <li><code>always</code>:  Enables colored output regardless of the detected environment</li>
 <li><code>never</code>:  Disables colored output</li>
 </ul></dd><dt id="prek-list--config"><a href="#prek-list--config"><code>--config</code></a>, <code>-c</code> <i>config</i></dt><dd><p>Path to alternate config file</p>
+</dd><dt id="prek-list--group"><a href="#prek-list--group"><code>--group</code></a> <i>group</i></dt><dd><p>Show hooks belonging to the specified group.</p>
+<p>Can be specified multiple times.</p>
 </dd><dt id="prek-list--help"><a href="#prek-list--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
 </dd><dt id="prek-list--hook-stage"><a href="#prek-list--hook-stage"><code>--hook-stage</code></a> <i>hook-stage</i></dt><dd><p>Show only hooks that has the specified stage</p>
 <p>Possible values:</p>
@@ -350,6 +356,8 @@ prek list [OPTIONS] [HOOK|PROJECT]...
 <li><code>swift</code></li>
 <li><code>system</code></li>
 </ul></dd><dt id="prek-list--log-file"><a href="#prek-list--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
+</dd><dt id="prek-list--no-group"><a href="#prek-list--no-group"><code>--no-group</code></a> <i>group</i></dt><dd><p>Do not show hooks belonging to the specified group.</p>
+<p>Can be specified multiple times. Exclusion wins over inclusion.</p>
 </dd><dt id="prek-list--no-progress"><a href="#prek-list--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>
 <p>For example, spinners or progress bars.</p>
 </dd><dt id="prek-list--output-format"><a href="#prek-list--output-format"><code>--output-format</code></a> <i>output-format</i></dt><dd><p>The output format</p>
@@ -804,7 +812,7 @@ prek try-repo [OPTIONS] <REPO> [HOOK|PROJECT]...
 </ul>
 <p>Can be specified multiple times. Also accepts <code>PREK_SKIP</code> or <code>SKIP</code> environment variables (comma-delimited).</p>
 </dd><dt id="prek-try-repo--stage"><a href="#prek-try-repo--stage"><code>--stage</code></a>, <code>--hook-stage</code> <i>stage</i></dt><dd><p>The stage during which the hook is fired.</p>
-<p>When specified, only hooks configured for that stage (for example <code>manual</code>, <code>pre-commit</code>, or <code>pre-push</code>) will run. Defaults to <code>pre-commit</code> if not specified. For hooks specified directly in the command line, fallback to <code>manual</code> stage if no hooks found for <code>pre-commit</code> stage.</p>
+<p>When specified, only hooks configured for that stage (for example <code>manual</code>, <code>pre-commit</code>, or <code>pre-push</code>) will run. When not specified, this command starts with hooks eligible for <code>pre-commit</code>. If no hook is selected and the command named hook IDs, those same IDs are matched again against hooks configured for <code>manual</code>.</p>
 <p>Possible values:</p>
 <ul>
 <li><code>manual</code></li>

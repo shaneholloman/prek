@@ -67,8 +67,8 @@ manifest semantics. For the upstream reference, see:
 
 !!! note "Manifest fields only"
 
-    Project configuration-only fields, such as `priority`, are not manifest hook
-    fields.
+    Project configuration-only fields, such as `priority` and `groups`, are not
+    manifest hook fields.
 
 Example:
 
@@ -95,6 +95,9 @@ configuration. If neither is set, `prek` falls back to the top-level
 
 The `manual` stage is special: it never runs automatically and is only executed
 when a user explicitly runs `prek run --hook-stage manual <hook-id>`.
+
+For what each stage means and whether it operates on repository files, see
+[Supported Git Hook Stages](reference/configuration.md#supported-git-hook-stages).
 
 Example:
 
