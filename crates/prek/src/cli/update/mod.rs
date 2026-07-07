@@ -2,20 +2,20 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use futures::{StreamExt, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use rustc_hash::FxHashMap;
 use semver::Version;
 
 use crate::cli::ExitStatus;
-use crate::cli::auto_update::config::write_new_config;
-use crate::cli::auto_update::display::{apply_repo_updates, warn_frozen_mismatches};
-use crate::cli::auto_update::source::{collect_repo_sources, evaluate_repo_source};
-use crate::cli::reporter::AutoUpdateReporter;
+use crate::cli::reporter::UpdateReporter;
 use crate::cli::run::Selectors;
+use crate::cli::update::config::write_new_config;
+use crate::cli::update::display::{apply_repo_updates, warn_frozen_mismatches};
+use crate::cli::update::source::{collect_repo_sources, evaluate_repo_source};
 use crate::config::GlobPatterns;
 use crate::fs::CWD;
 use crate::printer::Printer;
-use crate::run::CONCURRENCY;
+use crate::run::INTERNAL_CONCURRENCY;
 use crate::settings::FilesystemOptions;
 use crate::store::Store;
 use crate::workspace::{Project, Workspace};
@@ -82,7 +82,7 @@ enum FrozenMismatchAction {
     NoReplacement,
 }
 
-/// Whether the pinned SHA is available from the refs fetched for `auto-update`.
+/// Whether the pinned SHA is available from the refs fetched for `prek update`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommitPresence {
     /// The commit is present in the fetched repository view.
@@ -367,7 +367,7 @@ type RepoOccurrences<'a> = FxHashMap<(&'a Path, &'a str), usize>;
 
 /// Updates remote repo revisions and, when possible, keeps existing `# frozen:` comments in sync.
 #[expect(clippy::fn_params_excessive_bools)]
-pub(crate) async fn auto_update(
+pub(crate) async fn update(
     store: &Store,
     config: Option<PathBuf>,
     filter_repos: Vec<String>,
@@ -393,15 +393,19 @@ pub(crate) async fn auto_update(
 
     let tag_filters =
         TagFilters::new(include_tag, exclude_tag, repo_include_tag, repo_exclude_tag)?;
-    let jobs = if jobs == 0 { *CONCURRENCY } else { jobs };
-    let reporter = AutoUpdateReporter::new(printer);
+    let jobs = if jobs == 0 {
+        *INTERNAL_CONCURRENCY
+    } else {
+        jobs
+    };
+    let reporter = UpdateReporter::new(printer);
 
     let repo_sources = collect_repo_sources(&workspace, cooldown_days, filesystem.as_ref())?;
     let sources = repo_sources.iter().filter(|repo_source| {
         (filter_repos.is_empty() || filter_repos.iter().any(|repo| repo == repo_source.repo))
             && !exclude_repos.iter().any(|repo| repo == repo_source.repo)
     });
-    let outcomes: Vec<RepoUpdate<'_>> = futures::stream::iter(sources)
+    let outcomes: Vec<RepoUpdate<'_>> = futures_util::stream::iter(sources)
         .map(async |repo_source| {
             let progress = reporter.on_update_start(repo_source.repo);
             let result =

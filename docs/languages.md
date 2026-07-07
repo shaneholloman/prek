@@ -193,12 +193,14 @@ Runtime behavior:
 - The container is run with `--entrypoint` set to the hook `entry`, so the image’s default command is not used when filenames are passed.
 - Environment variables configured via `env` are passed using `-e`.
 - On Linux, prek tries to run as a non-root user and handles rootless Podman with `--userns=keep-id`.
+- prek passes `--init` so signals are forwarded and child processes are reaped inside the container.
 
 Use `docker` when you need a language runtime that isn’t otherwise supported; the container provides the execution environment.
 
 !!! note "prek-only"
 
     prek auto-detects the container runtime (Docker, Podman, or [Container](https://github.com/apple/container)) and can be overridden with `PREK_CONTAINER_RUNTIME`.
+    Set `PREK_DOCKER_NO_INIT=1` to skip the runtime's `--init` flag in container environments that cannot run the init helper. This is a compatibility escape hatch; disabling `--init` can leave containers running after Ctrl-C if the container's PID 1 does not handle forwarded signals.
     See [Environment Variable Reference](reference/environment-variables.md) for details.
 
 ### docker_image
@@ -209,6 +211,7 @@ Runtime behavior:
 
 - Uses the same bind-mount and `/src` working directory as `docker` hooks.
 - Environment variables configured via `env` are passed using `-e`.
+- Uses the same `--init` behavior as `docker` hooks.
 
 If the image already defines an `ENTRYPOINT`, you can omit `--entrypoint` in `entry`. Otherwise, specify it explicitly in `entry`.
 
@@ -272,6 +275,9 @@ Supported formats:
 - Semver ranges like `>=1.20, <1.23`
 
 Pre-release strings (for example `go1.22rc1`) are not supported yet.
+
+For remote hook repositories, `language_version` may be inferred from the `go`
+and `toolchain` directives in the hook repository's `go.mod`.
 
 ### haskell
 
@@ -359,6 +365,9 @@ Supported formats:
 
     prek uses `uv` for virtual environments and dependency installs, and can auto-install Python toolchains based on `language_version`.
 
+For remote hook repositories, `language_version` may be inferred from
+`[project].requires-python` in the hook repository's `pyproject.toml`.
+
 #### Dependency management with `uv`
 
 prek uses `uv` for creating virtual environments and installing dependencies:
@@ -409,7 +418,7 @@ main()
 
 - The first part of the `entry` field must be a path to a local Python script
 - If `additional_dependencies` is specified in `.pre-commit-config.yaml`, script metadata will be ignored
-- When both `language_version` (in config) and `requires-python` (in script) are set, `language_version` takes precedence
+- When both `language_version` (in config) and `requires-python` (in script) are set, script metadata takes precedence
 - Only `dependencies` and `requires-python` fields are supported; other metadata like `tool.uv` is ignored
 
 ### r
@@ -452,7 +461,7 @@ Supported formats:
 
     Ruby interpreters are downloaded from those built by the `rv` project, and as such are limited in supported platform versions (currently limited to MacOS and Linux on x86_64 and ARM64). Older versions are also not available, with the oldest being 3.2.1. Unsupported platforms or versions will require a compatible system Ruby installation.
 
-    The `PREK_RUBY_MIRROR` environment variable can be used to point to a different source for installers, for example to support mirrors or air-gapped CI environments. Mirrors need to follow the GitHub URL patterns, but note that although the GitHub hostname changes between `api.github.com` and `github.com` as needed, any non-GitHub mirror server will not be remapped in this manner. Where Ruby is being downloaded from GitHub (either from the upstream `rv` or a mirror), this remapping does occur, and any `GITHUB_TOKEN` will be sent with the requests. This both limits impact of rate limiting, and also allows a private GitHub repository to be used (e.g. for a vetted subset of `rv` rubies to be mirrored). Note that GitHub tokens will only be sent to mirrors which are hosted on GitHub.
+    The `PREK_RUBY_MIRROR` environment variable can point Ruby downloads at a different source, for example a private mirror or an air-gapped CI mirror. Mirrors should provide the selected Ruby archive assets and a `SHA256SUMS` asset from the same release download location so downloaded Rubies can be verified. If checksum metadata is missing, prek warns and continues by default; set [`PREK_DOWNLOAD_CHECKSUM_POLICY`](reference/environment-variables.md#prek_download_checksum_policy) to `required` to fail instead. If the mirror is an exact HTTPS GitHub repository URL (`https://github.com/owner/repo`, with an optional `:443` port), prek uses the GitHub API for release metadata and may send `GITHUB_TOKEN` for rate limits or private mirrors. Non-GitHub mirrors are used as-is and never receive `GITHUB_TOKEN`.
 
 Gems specified in hook gemspec files and `additional_dependencies` are installed into an isolated gemset shared across hooks with the same Ruby version and dependencies.
 
@@ -551,7 +560,9 @@ Use `script` for simple repository scripts that only need file paths and no mana
 
 prek installs each `additional_dependencies` item with `deno install --global` into the hook environment. The hook runs from the work repository with an isolated `DENO_DIR` for cache separation.
 
-Deno hooks run without needing a pre-installed Deno runtime when toolchain download is available.
+Deno hooks run without needing a pre-installed Deno runtime when toolchain download is available. Managed downloads verify Deno release checksum sidecars when they are available.
+
+By default, missing checksums produce a warning and the download continues without checksum verification. Set [`PREK_DOWNLOAD_CHECKSUM_POLICY`](reference/environment-variables.md#prek_download_checksum_policy) to `required` to make missing checksum metadata fail, or to `disabled` to skip checksum verification.
 
 #### Rules
 

@@ -15,12 +15,12 @@ repos:
       - id: end-of-file-fixer
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.47.2
+    rev: 37bb98842b0d8c4ffebdb75301a13db0267cef89  # frozen: v1.47.2
     hooks:
       - id: typos
 
   - repo: https://github.com/executablebooks/mdformat
-    rev: '1.0.0'
+    rev: 82912cdaea4fb830f751504486a7879c70526547  # frozen: 1.0.0
     hooks:
       - id: mdformat
         language: python  # ensures that Renovate can update additional_dependencies
@@ -31,7 +31,7 @@ repos:
           - mdformat-simple-breaks==0.1.0
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: 0.37.2
+    rev: 5030dca3047414c338091455ac41803200ec1f0f  # frozen: 0.37.3
     hooks:
       - id: check-metaschema
         files:
@@ -40,14 +40,12 @@ repos:
       - id: check-renovate
         additional_dependencies: ['json5']
 
-  - repo: local
+  - repo: https://github.com/tombi-toml/tombi-pre-commit
+    rev: 1376e3d73ce106474179c8adfda11d1e50b7d4dc  # frozen: v1.1.6
     hooks:
-      - id: taplo-fmt
-        name: taplo fmt
-        entry: taplo fmt --config .config/taplo.toml
-        language: python
-        additional_dependencies: ["taplo==0.9.3"]
-        types: [toml]
+      - id: tombi-format
+        args: ["--offline"]
+        files: \.toml$
 
   - repo: local
     hooks:

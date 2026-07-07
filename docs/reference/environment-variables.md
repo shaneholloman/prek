@@ -30,15 +30,21 @@ Allow running without a configuration file (useful for ad-hoc runs).
 
 ### `PREK_NO_CONCURRENCY`
 
-Disable parallelism for installs and runs.
-If set, force concurrency to 1.
+Disable hook and batch parallelism during `prek run`.
+If set, force `PREK_CONCURRENT_HOOKS` and `PREK_CONCURRENT_BATCHES` to 1.
 
-### `PREK_MAX_CONCURRENCY`
+### `PREK_CONCURRENT_HOOKS`
 
-Set the maximum number of concurrent hooks (minimum 1).
+Set the maximum number of hooks that can run at once during `prek run` (minimum 1).
 Defaults to the number of CPU cores when unset.
 Ignored when `PREK_NO_CONCURRENCY` is set.
-If you encounter "Too many open files" errors, lowering this value or raising the file descriptor limit with `ulimit -n` can help.
+
+### `PREK_CONCURRENT_BATCHES`
+
+Set the maximum number of batches that each hook can run at once during `prek run` (minimum 1).
+A batch is one hook command invocation over a subset of the matched filenames.
+Defaults to the number of CPU cores when unset.
+Ignored when `PREK_NO_CONCURRENCY` is set.
 
 ### `PREK_NO_FAST_PATH`
 
@@ -64,6 +70,17 @@ If not set, prek automatically selects the best available source.
 
 Use the system trusted store instead of the bundled `webpki-roots` crate.
 
+### `PREK_DOWNLOAD_CHECKSUM_POLICY`
+
+Control checksum verification for managed toolchain downloads that use checksum sidecar files.
+Options:
+
+- `warn-missing` (default): verify downloads when a checksum is available; warn and continue when checksum metadata is missing
+- `required`: require the checksum sidecar to be available and valid
+- `disabled`: skip checksum fetching and verification
+
+Checksum mismatches are hard errors whenever verification is enabled.
+
 ### `PREK_CONTAINER_RUNTIME`
 
 Specify the container runtime to use for container-based hooks (e.g., `docker`, `docker_image`).
@@ -74,14 +91,17 @@ Options:
 - `podman`
 - `container` (Apple's Container runtime on macOS, see [container](https://github.com/apple/container))
 
-### `PREK_LOG_TRUNCATE_LIMIT`
+### `PREK_DOCKER_NO_INIT`
 
-Control the truncation limit for command lines shown in trace logs (`Executing ...`).
-Defaults to `120` characters of arguments; set a larger value to reduce truncation.
+Disable passing the runtime's `--init` flag when running `docker` and `docker_image` hooks.
+This is a compatibility escape hatch for container environments that cannot run the init helper.
+Disabling `--init` can leave containers running after Ctrl-C if the container's PID 1 does not handle forwarded signals.
 
 ### `PREK_RUBY_MIRROR`
 
 Override the Ruby installer base URL used for downloaded Ruby toolchains (for example, when using mirrors or air-gapped CI environments).
+Mirrors should provide release-compatible Ruby archive assets and a `SHA256SUMS` asset in the same release download location.
+Only exact HTTPS GitHub repository mirrors (`https://github.com/owner/repo`, optionally with port `443`) receive `GITHUB_TOKEN`; other mirrors are used without GitHub authentication.
 See [Ruby language support](../languages.md#ruby) for details.
 
 ### `PREK_RUST_PROFILE`

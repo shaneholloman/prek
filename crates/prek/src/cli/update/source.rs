@@ -1,23 +1,24 @@
+use std::collections::hash_map::Entry;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, trace, warn};
 
-use crate::cli::auto_update::config::read_frozen_refs;
-use crate::cli::auto_update::repository::{
+use crate::cli::update::config::read_frozen_refs;
+use crate::cli::update::repository::{
     checkout_and_validate_manifest, get_tags_pointing_at_revision, is_commit_present,
     list_tag_metadata, resolve_revision_to_commit, select_best_tag, select_update_revision,
     setup_and_fetch_repo,
 };
-use crate::cli::auto_update::{
+use crate::cli::update::{
     CommitPresence, FrozenMismatch, FrozenMismatchAction, FrozenMismatchReason, RepoSource,
     RepoTarget, RepoUpdate, RepoUsage, ResolvedRepoUpdate, Revision, RevisionSelection, TagFilters,
     TagTimestamp,
 };
 use crate::config::{Repo, looks_like_sha};
 use crate::fs::Simplified;
-use crate::settings::{AutoUpdateSettings, FilesystemOptions};
+use crate::settings::{FilesystemOptions, UpdateSettings};
 use crate::workspace::Workspace;
 
 type RepoTargetKey<'a> = (&'a str, Vec<&'a str>, u8);
@@ -33,12 +34,12 @@ pub(super) fn collect_repo_sources<'a>(
     let mut repo_sources: RepoSourcesByRepo<'a> = FxHashMap::default();
 
     for project in workspace.projects() {
-        let settings = AutoUpdateSettings::resolve(
+        let settings = UpdateSettings::resolve(
             cli_cooldown_days,
             filesystem,
             project
                 .config()
-                .auto_update
+                .update
                 .as_ref()
                 .and_then(|options| options.cooldown_days),
         );
@@ -80,21 +81,21 @@ pub(super) fn collect_repo_sources<'a>(
             required_hook_ids.sort_unstable();
             required_hook_ids.dedup();
 
-            let target = repo_sources
-                .entry(remote_repo.repo.as_str())
-                .or_default()
-                .entry((
-                    remote_repo.rev.as_str(),
-                    required_hook_ids.clone(),
-                    cooldown_days,
-                ))
-                .or_insert_with(|| RepoTarget {
-                    repo: remote_repo.repo.as_str(),
-                    current_rev: remote_repo.rev.as_str(),
-                    cooldown_days,
-                    required_hook_ids,
-                    usages: Vec::new(),
-                });
+            let targets = repo_sources.entry(remote_repo.repo.as_str()).or_default();
+            let target_key = (remote_repo.rev.as_str(), required_hook_ids, cooldown_days);
+            let target = match targets.entry(target_key) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let required_hook_ids = entry.key().1.clone();
+                    entry.insert(RepoTarget {
+                        repo: remote_repo.repo.as_str(),
+                        current_rev: remote_repo.rev.as_str(),
+                        cooldown_days,
+                        required_hook_ids,
+                        usages: Vec::new(),
+                    })
+                }
+            };
             target.usages.push(RepoUsage {
                 project,
                 remote_count,
@@ -154,9 +155,11 @@ async fn collect_frozen_mismatches<'a>(
         .iter()
         .filter_map(|usage| {
             let current_frozen = usage.current_frozen.as_deref()?;
-            let frozen_commit = resolved_frozen_refs.get(current_frozen).cloned().flatten();
+            let frozen_commit = resolved_frozen_refs
+                .get(current_frozen)
+                .and_then(|commit| commit.as_deref());
 
-            let reason = match frozen_commit.as_deref() {
+            let reason = match frozen_commit {
                 Some(frozen_commit) if frozen_commit.eq_ignore_ascii_case(target.current_rev) => {
                     return None;
                 }

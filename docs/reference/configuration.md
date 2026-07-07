@@ -11,16 +11,16 @@ This page documents the configuration keys that `prek` understands.
 
 This file stores user-level `prek` settings and does not define project hooks.
 
-### Global `auto_update.cooldown_days`
+### Global `update.cooldown_days`
 
-Default cooldown for [`prek auto-update`](cli.md#prek-auto-update).
+Default cooldown for [`prek update`](cli.md#prek-update).
 
 - Type: integer days, `0` to `255`
 - Default: `0`
-- CLI override: [`prek auto-update --cooldown-days <DAYS>`](cli.md#prek-auto-update)
+- CLI override: [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
 
 ```toml
-[auto_update]
+[update]
 cooldown_days = 7
 ```
 
@@ -28,11 +28,15 @@ The age is computed from the tag creation timestamp for annotated tags, or from 
 
 !!! tip "Cooldowns never downgrade"
 
-    If the current `rev` is newer than the latest cooldown-eligible tag, [`prek auto-update`](cli.md#prek-auto-update) keeps the current `rev` instead of downgrading it.
+    If the current `rev` is newer than the latest cooldown-eligible tag, [`prek update`](cli.md#prek-update) keeps the current `rev` instead of downgrading it.
 
-Project configs can also set [`auto_update.cooldown_days`](#auto_updatecooldown_days). The effective precedence is:
+!!! note "Compatibility alias"
 
-1. [`prek auto-update --cooldown-days <DAYS>`](cli.md#prek-auto-update)
+    The legacy `auto_update.cooldown_days` key is still accepted as an alias.
+
+Project configs can also set [`update.cooldown_days`](#updatecooldown_days). The effective precedence is:
+
+1. [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
 2. project config
 3. user-level global config
 4. default `0`
@@ -268,6 +272,36 @@ Allowed values:
 
 See [Supported Git Hook Stages](#supported-git-hook-stages) for what each value means.
 
+### `default_env`
+
+<a id="prek-only-default-env"></a>
+
+!!! note "prek-only"
+
+    `default_env` is a `prek` extension and may not be recognized by upstream `pre-commit`.
+
+Runtime environment variables to apply to every hook in this config.
+If a hook sets the same variable in [`env`](#prek-only-env), the hook-level value wins.
+
+- Type: map of string to string
+- Default: none
+
+Example:
+
+=== "prek.toml"
+
+    ```toml
+    default_env = { UV_PYTHON = "", VIRTUAL_ENV = "" }
+    ```
+
+=== ".pre-commit-config.yaml"
+
+    ```yaml
+    default_env:
+      UV_PYTHON: ""
+      VIRTUAL_ENV: ""
+    ```
+
 ### `default_install_hook_types`
 
 Default Git shim name(s) installed by [`prek install`](cli.md#prek-install) when you don’t pass `--hook-type`.
@@ -291,33 +325,37 @@ Allowed values:
 - `pre-merge-commit`
 - `pre-rebase`
 
-### `auto_update.cooldown_days`
+### `update.cooldown_days`
 
 !!! note "prek-only"
 
     This top-level key is a `prek` extension and is not recognized by upstream `pre-commit`.
 
-Project default cooldown for [`prek auto-update`](cli.md#prek-auto-update).
+Project default cooldown for [`prek update`](cli.md#prek-update).
 
 - Type: integer days, `0` to `255`
 - Default: inherited from the user-level global config, or `0`
-- CLI override: [`prek auto-update --cooldown-days <DAYS>`](cli.md#prek-auto-update)
+- CLI override: [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
 
 === "prek.toml"
 
     ```toml
-    [auto_update]
+    [update]
     cooldown_days = 7
     ```
 
 === ".pre-commit-config.yaml"
 
     ```yaml
-    auto_update:
+    update:
       cooldown_days: 7
     ```
 
-In workspace mode, this setting is scoped to the project config file that defines it. It applies only to that project and is not inherited by nested projects. Sub-projects use their own `auto_update` setting, then the user-level global config, then the default. If two projects use the same repo URL with different cooldown settings, [`prek auto-update`](cli.md#prek-auto-update) fetches the repo once but evaluates each project with its own cooldown.
+!!! note "Compatibility alias"
+
+    The legacy `auto_update.cooldown_days` key is still accepted as an alias.
+
+In workspace mode, this setting is scoped to the project config file that defines it. It applies only to that project and is not inherited by nested projects. Sub-projects use their own `update` setting, then the user-level global config, then the default. If two projects use the same repo URL with different cooldown settings, [`prek update`](cli.md#prek-update) fetches the repo once but evaluates each project with its own cooldown.
 
 ### `minimum_prek_version`
 
@@ -454,7 +492,7 @@ Example:
 Notes:
 
 - For reproducibility, prefer immutable pins (tags or commit SHAs).
-- [`prek auto-update`](cli.md#prek-auto-update) can help update [`rev`](#rev) values.
+- [`prek update`](cli.md#prek-update) can help update [`rev`](#rev) values.
 
 ### `repo: local`
 
@@ -807,9 +845,18 @@ Extra runtime environment variables for the hook process.
 Values override the existing process environment (including variables such as `PATH`).
 They are applied when the hook runs, not when `prek` installs or prepares the hook environment.
 
+!!! note "Runtime only"
+
+    `env` cannot be used to control hook installation or environment preparation.
+    Keeping it runtime-only means the installed hook environment does not depend on
+    ambient variables from the invoking shell. If those variables affected
+    installation, changing one of them would imply that `prek` may need to
+    recreate the hook environment.
+
 For remote hooks, `env` may also be set by the hook author in
 `.pre-commit-hooks.yaml`. Values from the project configuration are merged with
 manifest values and override duplicate keys.
+Values set directly on a hook override matching [`default_env`](#default_env) values.
 
 For `docker` / `docker_image` hooks, these variables are passed into the container rather than being applied to the container runtime command.
 
@@ -1002,7 +1049,7 @@ Controls whether `prek` appends the matching filenames to the command line.
 
 Set `pass_filenames: false` for hooks that don’t accept file arguments (or that discover files themselves).
 
-Set `pass_filenames: n` (a positive integer) to limit each invocation to at most `n` filenames. When there are more matching files than `n`, `prek` splits them across multiple invocations. Those invocations may run concurrently unless [`require_serial`](#require_serial) is `true`. This is useful for tools that can only process a limited number of files at once.
+Set `pass_filenames: n` (a positive integer) to limit each invocation to at most `n` filenames. When there are more matching files than `n`, `prek` splits them across multiple batches. A batch is one hook command invocation over a subset of the matched filenames. Batches may run concurrently up to `PREK_CONCURRENT_BATCHES` unless [`require_serial`](#require_serial) is `true`. This is useful for tools that can only process a limited number of files at once.
 
 Prek will automatically limit the number of filenames to ensure command lines don’t exceed the OS limit, even when `pass_filenames: true`.
 
@@ -1121,7 +1168,7 @@ fails.
 
 ### `require_serial`
 
-Force a hook to run without parallel invocations (one in-flight process for that hook at a time).
+Force a hook to run without parallel batches (one in-flight process for that hook at a time).
 
 - Type: boolean
 - Default: `false`
@@ -1143,7 +1190,7 @@ Scope:
 - `priority` is evaluated **within a single configuration file** and is compared across **all hooks in that file**, even if they appear under different `repos:` entries.
 - `priority` does **not** coordinate across different config files. In workspace mode, each project’s config file is scheduled independently.
 
-Hooks run in ascending priority order: **lower `priority` values run earlier**. Hooks that share the same `priority` value run concurrently, subject to the global concurrency limit.
+Hooks run in ascending priority order: **lower `priority` values run earlier**. Hooks that share the same `priority` value run concurrently, subject to `PREK_CONCURRENT_HOOKS`.
 
 When `priority` is omitted, `prek` assigns an implicit value based on hook order to preserve sequential behavior.
 
@@ -1223,7 +1270,7 @@ Example:
 
 !!! note "`require_serial` is different"
 
-    [`require_serial`](#require_serial) set to `true` prevents concurrent invocations of the *same hook*.
+    [`require_serial`](#require_serial) set to `true` prevents concurrent batches of the *same hook*.
     It does not prevent other hooks from running alongside it; use a unique `priority` if you need exclusivity.
 
 ### `fail_fast`

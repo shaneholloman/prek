@@ -5,13 +5,19 @@
   <img width="600" alt="prek" src="https://raw.githubusercontent.com/j178/prek/master/docs/assets/logo.png" />
 </picture>
 
+<a href="https://trendshift.io/repositories/14578?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-14578" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/14578" alt="j178%2Fprek | Trendshift" width="250" height="55"/></a>
+
 [![prek](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json)](https://github.com/j178/prek)
 [![PyPI version](https://img.shields.io/pypi/v/prek.svg)](https://pypi.python.org/pypi/prek)
 [![codecov](https://codecov.io/github/j178/prek/graph/badge.svg?token=MP6TY24F43)](https://codecov.io/github/j178/prek)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/prek?period=monthly&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=downloads%2Fmonth)](https://pepy.tech/projects/prek)
 [![Discord](https://img.shields.io/discord/1403581202102878289?logo=discord)](https://discord.gg/3NRJUqJz86)
 
+**[Installation](#installation) • [Quick start](#quick-start) • [Documentation](https://prek.j178.dev/)**
+
 </div>
+
+## About
 
 <!-- --8<-- [start: description] -->
 
@@ -40,14 +46,6 @@ Although prek is pretty new, it’s already powering real‑world projects like 
 
 <!-- --8<-- [end:features] -->
 
-## Table of contents
-
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Why prek?](#why-prek)
-- [Who is using prek?](#who-is-using-prek)
-- [Acknowledgements](#acknowledgements)
-
 ## Installation
 
 <details>
@@ -60,7 +58,7 @@ On Linux and macOS:
 <!-- --8<-- [start: linux-standalone-install] -->
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.4.5/prek-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/j178/prek/releases/download/v0.4.8/prek-installer.sh | sh
 ```
 
 <!-- --8<-- [end: linux-standalone-install] -->
@@ -70,7 +68,7 @@ On Windows:
 <!-- --8<-- [start: windows-standalone-install] -->
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.4.5/prek-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/j178/prek/releases/download/v0.4.8/prek-installer.ps1 | iex"
 ```
 
 <!-- --8<-- [end: windows-standalone-install] -->
@@ -302,7 +300,7 @@ jobs:
   prek:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: j178/prek-action@v2
 ```
 
@@ -370,9 +368,10 @@ prek self update
 
 ### prek includes security-focused safeguards
 
-- [`prek auto-update`](https://prek.j178.dev/reference/cli/#prek-auto-update) supports `--cooldown-days`, so you can keep newly published releases on hold for a cooling-off period before adopting them.
-- [`prek auto-update`](https://prek.j178.dev/reference/cli/#prek-auto-update) validates pinned SHA revisions against the fetched upstream refs, including impostor-commit detection, and keeps `# frozen:` comments in sync with the configured commit.
-- [`prek auto-update --check`](https://prek.j178.dev/reference/cli/#prek-auto-update--check) is useful in CI when you want updates or frozen-reference mismatches to fail the job without rewriting the config.
+- For supported managed toolchain downloads, `prek` verifies the downloaded archive or installer checksum before extracting or installing it, helping ensure the integrity of downloaded toolchains.
+- [`prek update`](https://prek.j178.dev/reference/cli/#prek-update) supports `--cooldown-days`, so you can keep newly published releases on hold for a cooling-off period before adopting them.
+- [`prek update`](https://prek.j178.dev/reference/cli/#prek-update) validates pinned SHA revisions against the fetched upstream refs, including impostor-commit detection, and keeps `# frozen:` comments in sync with the configured commit.
+- [`prek update --check`](https://prek.j178.dev/reference/cli/#prek-update--check) is useful in CI when you want updates or frozen-reference mismatches to fail the job without rewriting the config.
 
 For more detailed improvements prek offers, take a look at [Difference from pre-commit](https://prek.j178.dev/diff/).
 
@@ -399,7 +398,6 @@ GitHub stars are current as of April 15, 2026.
 - [Future-House/paper-qa](https://github.com/Future-House/paper-qa/pull/1098) <sub>8,377 stars</sub>
 - [getsentry/sentry](https://github.com/getsentry/sentry/pull/110808) <sub>43,639 stars</sub>
 - [godotengine/godot](https://github.com/godotengine/godot/pull/119150) <sub>110,312 stars</sub>
-- [Goldziher/kreuzberg](https://github.com/Goldziher/kreuzberg/pull/142) <sub>7,550 stars</sub>
 - [home-assistant/core](https://github.com/home-assistant/core/pull/160427) <sub>86,029 stars</sub>
 - [jcrist/msgspec](https://github.com/jcrist/msgspec/pull/918) <sub>3,692 stars</sub>
 - [jlowin/fastmcp](https://github.com/jlowin/fastmcp/pull/2309) <sub>24,539 stars</sub>
