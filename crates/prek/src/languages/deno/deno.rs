@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::languages::deno::DenoRequest;
 use crate::languages::deno::installer::{DenoInstaller, DenoResult, bin_dir};
 use crate::languages::version::LanguageRequest;
@@ -56,11 +56,12 @@ fn parse_install_dependency(spec: &str) -> (&str, Option<&str>) {
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct Deno;
 
-impl LanguageImpl for Deno {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Deno {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -79,11 +80,7 @@ impl LanguageImpl for Deno {
             .await
             .context("Failed to install deno")?;
 
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
 
         info.with_toolchain(deno.deno().to_path_buf());
         info.with_language_version((**deno.version()).clone());
@@ -163,7 +160,6 @@ impl LanguageImpl for Deno {
 
     async fn check_health(&self, info: &InstallInfo) -> Result<()> {
         let deno = DenoResult::from_executable(info.toolchain.clone())
-            .fill_version()
             .await
             .context("Failed to query deno version")?;
 
@@ -180,9 +176,9 @@ impl LanguageImpl for Deno {
 
     async fn run(
         &self,
+        store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        store: &Store,
         reporter: &HookRunReporter,
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

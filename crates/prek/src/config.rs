@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use fancy_regex::Regex;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobSet};
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 use prek_identify::TagSet;
@@ -20,14 +20,113 @@ use crate::version;
 use crate::warn_user;
 use crate::warn_user_once;
 
-pub(crate) fn validate_group_name(group: &str) -> std::result::Result<(), &'static str> {
-    if group.is_empty() {
+pub(crate) fn validate_name(name: &str) -> std::result::Result<(), &'static str> {
+    if name.is_empty() {
         Err("cannot be empty")
-    } else if group.chars().any(char::is_whitespace) {
+    } else if name.chars().any(char::is_whitespace) {
         Err("cannot contain whitespace")
     } else {
         Ok(())
     }
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub(crate) struct PriorityAlias(
+    #[cfg_attr(feature = "schemars", schemars(regex(pattern = r"^\S+$")))] String,
+);
+
+impl TryFrom<String> for PriorityAlias {
+    type Error = String;
+
+    fn try_from(alias: String) -> std::result::Result<Self, Self::Error> {
+        validate_name(&alias).map_err(|reason| priority_alias_error(&alias, reason))?;
+        Ok(Self(alias))
+    }
+}
+
+impl<'de> Deserialize<'de> for PriorityAlias {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+impl std::fmt::Debug for PriorityAlias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl Display for PriorityAlias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", serde(untagged))]
+pub(crate) enum Priority {
+    Number(u32),
+    Alias(PriorityAlias),
+}
+
+impl<'de> Deserialize<'de> for Priority {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum PriorityWire {
+            Number(u32),
+            Alias(String),
+        }
+
+        match PriorityWire::deserialize(deserializer)? {
+            PriorityWire::Number(priority) => Ok(Self::Number(priority)),
+            PriorityWire::Alias(alias) => PriorityAlias::try_from(alias)
+                .map(Self::Alias)
+                .map_err(D::Error::custom),
+        }
+    }
+}
+
+impl std::fmt::Debug for Priority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(priority) => std::fmt::Debug::fmt(priority, f),
+            Self::Alias(alias) => std::fmt::Debug::fmt(alias, f),
+        }
+    }
+}
+
+impl Priority {
+    pub(crate) fn resolve(
+        &self,
+        priorities: &BTreeMap<PriorityAlias, u32>,
+        hook: &str,
+    ) -> std::result::Result<u32, Error> {
+        match self {
+            Self::Number(priority) => Ok(*priority),
+            Self::Alias(alias) => {
+                priorities
+                    .get(alias)
+                    .copied()
+                    .ok_or_else(|| Error::UnknownPriorityAlias {
+                        hook: hook.to_owned(),
+                        alias: alias.clone(),
+                    })
+            }
+        }
+    }
+}
+
+fn priority_alias_error(alias: &str, reason: &str) -> String {
+    format!("priority alias `{alias}` {reason}")
 }
 
 fn deserialize_groups<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
@@ -37,7 +136,7 @@ where
     let groups = Option::<Vec<String>>::deserialize(deserializer)?;
     if let Some(groups) = &groups {
         for group in groups {
-            if let Err(reason) = validate_group_name(group) {
+            if let Err(reason) = validate_name(group) {
                 return Err(D::Error::custom(format!("group name `{group}` {reason}")));
             }
         }
@@ -47,15 +146,23 @@ where
 
 #[derive(Clone)]
 pub(crate) struct GlobPatterns {
-    patterns: Vec<String>,
+    patterns: Vec<Glob>,
     set: GlobSet,
 }
 
 impl GlobPatterns {
     pub(crate) fn new(patterns: Vec<String>) -> Result<Self, globset::Error> {
-        let mut builder = GlobSetBuilder::new();
+        let patterns = patterns
+            .into_iter()
+            .map(|pattern| pattern.parse())
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_globs(patterns)
+    }
+
+    pub(crate) fn from_globs(patterns: Vec<Glob>) -> Result<Self, globset::Error> {
+        let mut builder = GlobSet::builder();
         for pattern in &patterns {
-            builder.add(Glob::new(pattern)?);
+            builder.add(pattern.clone());
         }
         let set = builder.build()?;
         Ok(Self { patterns, set })
@@ -70,10 +177,18 @@ impl GlobPatterns {
     }
 }
 
+fn debug_globs(globs: &[Glob]) -> impl std::fmt::Debug + '_ {
+    std::fmt::from_fn(|f| {
+        f.debug_list()
+            .entries(globs.iter().map(Glob::glob))
+            .finish()
+    })
+}
+
 impl std::fmt::Debug for GlobPatterns {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlobPatterns")
-            .field("patterns", &self.patterns)
+            .field("patterns", &debug_globs(&self.patterns))
             .finish_non_exhaustive()
     }
 }
@@ -285,6 +400,7 @@ pub enum Language {
     Lua,
     Node,
     Perl,
+    Php,
     Pygrep,
     Python,
     R,
@@ -694,7 +810,7 @@ pub(crate) struct RemoteHook {
     ///
     /// This is only allowed in project config files (e.g. `.pre-commit-config.yaml`).
     /// It is not allowed in manifests (e.g. `.pre-commit-hooks.yaml`).
-    pub priority: Option<u32>,
+    pub priority: Option<Priority>,
     /// User-defined hook groups used by `prek run --group` and `--no-group`.
     /// Group names cannot be empty or contain whitespace.
     #[serde(default, deserialize_with = "deserialize_groups")]
@@ -721,7 +837,7 @@ pub(crate) struct LocalHook {
     pub language: Language,
     /// Priority used by the scheduler to determine ordering and concurrency.
     /// Hooks with the same priority can run in parallel.
-    pub priority: Option<u32>,
+    pub priority: Option<Priority>,
     /// User-defined hook groups used by `prek run --group` and `--no-group`.
     /// Group names cannot be empty or contain whitespace.
     #[serde(default, deserialize_with = "deserialize_groups")]
@@ -744,7 +860,7 @@ pub(crate) struct MetaHook {
     pub name: String,
     /// Priority used by the scheduler to determine ordering and concurrency.
     /// Hooks with the same priority can run in parallel.
-    pub priority: Option<u32>,
+    pub priority: Option<Priority>,
     /// User-defined hook groups used by `prek run --group` and `--no-group`.
     /// Group names cannot be empty or contain whitespace.
     #[serde(default, deserialize_with = "deserialize_groups")]
@@ -835,7 +951,7 @@ pub(crate) struct BuiltinHook {
     pub entry: String,
     /// Priority used by the scheduler to determine ordering and concurrency.
     /// Hooks with the same priority can run in parallel.
-    pub priority: Option<u32>,
+    pub priority: Option<Priority>,
     /// User-defined hook groups used by `prek run --group` and `--no-group`.
     /// Group names cannot be empty or contain whitespace.
     #[serde(default, deserialize_with = "deserialize_groups")]
@@ -884,9 +1000,11 @@ impl TryFrom<RemoteHook> for BuiltinHook {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteRepo {
-    pub repo: String,
+    repo: String,
+    #[serde(skip)]
+    resolved_source: Option<String>,
     pub rev: String,
     #[serde(skip_serializing)]
     pub hooks: Vec<RemoteHook>,
@@ -897,13 +1015,13 @@ pub(crate) struct RemoteRepo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RemoteRepoKey<'a> {
-    repo: &'a str,
+    source: &'a str,
     rev: &'a str,
 }
 
 impl<'a> RemoteRepoKey<'a> {
-    pub(crate) fn repo(self) -> &'a str {
-        self.repo
+    pub(crate) fn source(self) -> &'a str {
+        self.source
     }
 
     pub(crate) fn rev(self) -> &'a str {
@@ -915,23 +1033,53 @@ impl RemoteRepo {
     pub fn new(repo: String, rev: String, hooks: Vec<RemoteHook>) -> Self {
         Self {
             repo,
+            resolved_source: None,
             rev,
             hooks,
             _unused_keys: BTreeMap::new(),
         }
     }
 
+    /// The repository value exactly as written in the configuration.
+    pub(crate) fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    /// The repository source used for fetch and cache identity.
+    pub(crate) fn source(&self) -> &str {
+        self.resolved_source.as_deref().unwrap_or(&self.repo)
+    }
+
+    pub(crate) fn set_resolved_source(&mut self, source: String) {
+        self.resolved_source = Some(source);
+    }
+
     pub fn key(&self) -> RemoteRepoKey<'_> {
         RemoteRepoKey {
-            repo: &self.repo,
+            source: self.source(),
             rev: &self.rev,
         }
     }
 }
 
+impl std::fmt::Debug for RemoteRepo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("RemoteRepo");
+        debug.field("repo", &self.repo);
+        if let Some(source) = &self.resolved_source {
+            debug.field("source", source);
+        }
+        debug
+            .field("rev", &self.rev)
+            .field("hooks", &self.hooks)
+            .field("_unused_keys", &self._unused_keys)
+            .finish()
+    }
+}
+
 impl Display for RemoteRepo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.repo, self.rev)
+        write!(f, "{}@{}", self.repo(), self.rev)
     }
 }
 
@@ -1109,6 +1257,7 @@ impl<'de> Deserialize<'de> for Repo {
                         };
                         Ok(Repo::Remote(RemoteRepo {
                             repo: repo_value,
+                            resolved_source: None,
                             rev,
                             hooks,
                             _unused_keys: unused,
@@ -1137,12 +1286,75 @@ where
     })
 }
 
+/// A configuration value that accepts either one string or a list of strings.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum StringOrList {
+    One(Glob),
+    Many(Vec<Glob>),
+}
+
+impl std::fmt::Debug for StringOrList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::One(pattern) => f.debug_tuple("One").field(&pattern.glob()).finish(),
+            Self::Many(patterns) => f.debug_tuple("Many").field(&debug_globs(patterns)).finish(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrList {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawStringOrList {
+            One(String),
+            Many(Vec<String>),
+        }
+
+        match RawStringOrList::deserialize(deserializer)? {
+            RawStringOrList::One(pattern) => {
+                pattern.parse().map(Self::One).map_err(D::Error::custom)
+            }
+            RawStringOrList::Many(patterns) => patterns
+                .into_iter()
+                .map(|pattern| pattern.parse().map_err(D::Error::custom))
+                .collect::<Result<_, _>>()
+                .map(Self::Many),
+        }
+    }
+}
+
+impl StringOrList {
+    pub(crate) fn as_slice(&self) -> &[Glob] {
+        match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
+        }
+    }
+}
+
+/// Overrides tag selection for one repository during `prek update`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub(crate) struct RepoTagFilterOptions {
+    pub(crate) include_tags: Option<StringOrList>,
+    pub(crate) exclude_tags: Option<StringOrList>,
+}
+
 /// Controls how `prek update` selects eligible releases.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub(crate) struct UpdateOptions {
     pub(crate) cooldown_days: Option<u8>,
+    pub(crate) freeze: Option<bool>,
+    pub(crate) include_tags: Option<StringOrList>,
+    pub(crate) exclude_tags: Option<StringOrList>,
+    pub(crate) repos: BTreeMap<String, RepoTagFilterOptions>,
 }
 
 // TODO: warn sensible regex
@@ -1160,6 +1372,9 @@ pub(crate) struct Config {
     /// Default settings for `prek update` in this project.
     #[serde(alias = "auto_update")]
     pub update: Option<UpdateOptions>,
+    /// Configuration-local aliases for numeric hook priorities.
+    #[serde(default)]
+    pub priorities: BTreeMap<PriorityAlias, u32>,
     pub repos: Vec<Repo>,
     /// A list of `--hook-types` which will be used by default when running `prek install`.
     /// Default is `[pre-commit]`.
@@ -1192,6 +1407,62 @@ pub(crate) struct Config {
     _unused_keys: BTreeMap<String, serde_json::Value>,
 }
 
+impl Config {
+    fn validate_priorities(&self) -> std::result::Result<(), Error> {
+        macro_rules! validate_hooks {
+            ($hooks:expr) => {
+                for hook in $hooks {
+                    if let Some(priority) = &hook.priority {
+                        priority.resolve(&self.priorities, &hook.id)?;
+                    }
+                }
+            };
+        }
+
+        for repo in &self.repos {
+            match repo {
+                Repo::Remote(repo) => validate_hooks!(&repo.hooks),
+                Repo::Local(repo) => validate_hooks!(&repo.hooks),
+                Repo::Meta(repo) => validate_hooks!(&repo.hooks),
+                Repo::Builtin(repo) => validate_hooks!(&repo.hooks),
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve local relative repository sources from the config file, not the process cwd.
+    fn resolve_relative_repo_sources(&mut self, config_path: &Path) -> Result<(), Error> {
+        let config_dir = config_path
+            .parent()
+            .expect("config file must have a parent");
+        for repo in &mut self.repos {
+            let Repo::Remote(remote) = repo else {
+                continue;
+            };
+
+            let configured_repo = remote.repo();
+            let repo_path = Path::new(configured_repo);
+            if configured_repo.starts_with("http://")
+                || configured_repo.starts_with("https://")
+                || !repo_path.is_relative()
+            {
+                continue;
+            }
+
+            let resolved = config_dir.join(repo_path);
+            if resolved.is_dir() {
+                remote.set_resolved_source(
+                    dunce::canonicalize(resolved)?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error(transparent)]
@@ -1202,6 +1473,9 @@ pub(crate) enum Error {
 
     #[error("Failed to parse `{0}`")]
     Toml(String, #[source] Box<toml::de::Error>),
+
+    #[error("Priority alias `{alias}` referenced by hook `{hook}` is not declared in `priorities`")]
+    UnknownPriorityAlias { hook: String, alias: PriorityAlias },
 }
 
 impl Error {
@@ -1249,7 +1523,6 @@ fn collect_unused_paths(config: &Config) -> Vec<String> {
     );
 
     for (repo_idx, repo) in config.repos.iter().enumerate() {
-        let repo_prefix = format!("repos[{repo_idx}]");
         let (repo_unused_keys, hooks_options): (_, Box<dyn Iterator<Item = &HookOptions>>) =
             match repo {
                 Repo::Remote(remote) => (
@@ -1270,13 +1543,19 @@ fn collect_unused_paths(config: &Config) -> Vec<String> {
                 ),
             };
 
-        push_unused_paths(
-            &mut paths,
-            &repo_prefix,
-            repo_unused_keys.keys().map(String::as_str),
-        );
+        if !repo_unused_keys.is_empty() {
+            let repo_prefix = format!("repos[{repo_idx}]");
+            push_unused_paths(
+                &mut paths,
+                &repo_prefix,
+                repo_unused_keys.keys().map(String::as_str),
+            );
+        }
         for (hook_idx, options) in hooks_options.enumerate() {
-            let hook_prefix = format!("{repo_prefix}.hooks[{hook_idx}]");
+            if options._unused_keys.is_empty() {
+                continue;
+            }
+            let hook_prefix = format!("repos[{repo_idx}].hooks[{hook_idx}]");
             push_unused_paths(
                 &mut paths,
                 &hook_prefix,
@@ -1318,12 +1597,14 @@ fn warn_unused_paths(path: &Path, entries: &[String]) {
 pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
     let content = fs_err::read_to_string(path)?;
 
-    let config = match path.extension() {
+    let mut config: Config = match path.extension() {
         Some(ext) if ext.eq_ignore_ascii_case("toml") => toml::from_str(&content)
             .map_err(|e| Error::Toml(path.user_display().to_string(), Box::new(e)))?,
         _ => serde_saphyr::from_str(&content)
             .map_err(|e| Error::Yaml(path.user_display().to_string(), Box::new(e)))?,
     };
+    config.validate_priorities()?;
+    config.resolve_relative_repo_sources(path)?;
 
     Ok(config)
 }
@@ -1336,27 +1617,20 @@ pub(crate) fn read_config(path: &Path) -> Result<Config, Error> {
     warn_unused_paths(path, &unused_paths);
 
     // Check for mutable revs and warn the user.
-    let repos_has_mutable_rev = config
+    let mutable_revs = config
         .repos
         .iter()
-        .filter_map(|repo| {
-            if let Repo::Remote(repo) = repo {
-                let rev = &repo.rev;
-                // A rev is considered mutable if it doesn't contain a '.' (like a version)
-                // and is not a hexadecimal string (like a commit SHA).
-                if !rev.contains('.') && !looks_like_sha(rev) {
-                    return Some(repo);
-                }
+        .filter_map(|repo| match repo {
+            // A rev is considered mutable if it doesn't contain a '.' (like a version)
+            // and is not a hexadecimal string (like a commit SHA).
+            Repo::Remote(repo) if !repo.rev.contains('.') && !looks_like_sha(&repo.rev) => {
+                Some(repo)
             }
-            None
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    if !repos_has_mutable_rev.is_empty() {
-        let msg = repos_has_mutable_rev
-            .iter()
-            .map(|repo| format!("{}: {}", repo.repo.cyan(), repo.rev.yellow()))
-            .join("\n");
-
+        .map(|repo| format!("{}: {}", repo.repo().cyan(), repo.rev.yellow()))
+        .join("\n");
+    if !mutable_revs.is_empty() {
         warn_user!(
             "{}",
             indoc::formatdoc! { r#"
@@ -1366,7 +1640,7 @@ pub(crate) fn read_config(path: &Path) -> Result<Config, Error> {
             See https://pre-commit.com/#using-the-latest-version-for-a-repository for more details.
             hint: `prek update` often fixes this",
             "#,
-            msg
+            mutable_revs
             }
         );
     }
@@ -1943,17 +2217,81 @@ mod tests {
 
     #[test]
     fn parse_update_options() {
-        let yaml = indoc::indoc! {r"
+        let yaml = indoc::indoc! {r#"
             update:
               cooldown_days: 7
+              freeze: true
+              include_tags: "v*"
+              exclude_tags: ["*-rc*"]
+              repos:
+                "https://example.com/repo":
+                  include_tags: "v1.*"
+                  exclude_tags: [nightly, "*-dev*"]
             repos: []
-        "};
+        "#};
         let result = serde_saphyr::from_str::<Config>(yaml).unwrap();
+        let options = result.update.unwrap();
 
-        assert_eq!(
-            result.update.and_then(|options| options.cooldown_days),
-            Some(7)
-        );
+        insta::assert_debug_snapshot!(options, @r###"
+        UpdateOptions {
+            cooldown_days: Some(
+                7,
+            ),
+            freeze: Some(
+                true,
+            ),
+            include_tags: Some(
+                One(
+                    "v*",
+                ),
+            ),
+            exclude_tags: Some(
+                Many(
+                    [
+                        "*-rc*",
+                    ],
+                ),
+            ),
+            repos: {
+                "https://example.com/repo": RepoTagFilterOptions {
+                    include_tags: Some(
+                        One(
+                            "v1.*",
+                        ),
+                    ),
+                    exclude_tags: Some(
+                        Many(
+                            [
+                                "nightly",
+                                "*-dev*",
+                            ],
+                        ),
+                    ),
+                },
+            },
+        }
+        "###);
+    }
+
+    #[test]
+    fn parse_update_options_rejects_invalid_glob() {
+        let yaml = indoc::indoc! {r#"
+            update:
+              include_tags: "["
+            repos: []
+        "#};
+        let err = serde_saphyr::from_str::<Config>(yaml).unwrap_err();
+
+        insta::assert_snapshot!(err, @r#"
+        error: line 2 column 17: error parsing glob '[': unclosed character class; missing ']'
+         --> <input>:2:17
+          |
+        1 | update:
+        2 |   include_tags: "["
+          |                 ^ error parsing glob '[': unclosed character class; missing ']'
+        3 | repos: []
+          |
+        "#);
     }
 
     #[test]

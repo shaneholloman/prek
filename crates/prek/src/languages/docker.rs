@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -15,7 +14,7 @@ use tracing::{trace, warn};
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::process::Cmd;
 use crate::run::{USE_COLOR, run_by_batch};
 use crate::store::Store;
@@ -324,8 +323,8 @@ impl Docker {
 
         info.language.hash(&mut hasher);
         info.language_version.hash(&mut hasher);
-        let deps = info.dependencies.iter().collect::<BTreeSet<&String>>();
-        deps.hash(&mut hasher);
+        info.repo().hash(&mut hasher);
+        info.dependencies.hash(&mut hasher);
 
         let digest = hex::encode(hasher.finish().to_le_bytes());
         format!("prek-{digest}")
@@ -441,20 +440,17 @@ impl Docker {
     }
 }
 
-impl LanguageImpl for Docker {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Docker {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
 
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
 
         Docker::build_docker_image(&hook, &info, true)
             .await
@@ -476,9 +472,9 @@ impl LanguageImpl for Docker {
 
     async fn run(
         &self,
+        _store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        _store: &Store,
         reporter: &HookRunReporter,
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

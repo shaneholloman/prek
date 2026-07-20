@@ -255,7 +255,7 @@ fn try_repo_specific_rev() -> Result<()> {
         ("'", "\""),
     ]);
 
-    cmd_snapshot!(filters, context.try_repo().arg(&repo_path)
+    cmd_snapshot!(filters, context.try_repo().arg("../home/test-repos/try-repo-specific-rev")
         .arg("--ref")
         .arg(&initial_rev), @r#"
     success: true
@@ -263,7 +263,7 @@ fn try_repo_specific_rev() -> Result<()> {
     ----- stdout -----
     Using generated `prek.toml`:
     [[repos]]
-    repo = "[HOME]/test-repos/try-repo-specific-rev"
+    repo = "../home/test-repos/try-repo-specific-rev"
     rev = "[COMMIT_SHA]"
     hooks = [
       { id = "test-hook" },
@@ -364,6 +364,105 @@ fn try_repo_relative_path() -> Result<()> {
 
     Test Hook................................................................Passed
     Another Hook.............................................................Passed
+
+    ----- stderr -----
+    "#);
+
+    Ok(())
+}
+
+#[test]
+fn try_repo_dot_path() -> Result<()> {
+    let context = TestContext::new();
+    let repo_path = create_hook_repo(&context, "try-repo-dot")?;
+
+    ChildPath::new(&repo_path)
+        .child("test.txt")
+        .write_str("test")?;
+    git_cmd(&repo_path).arg("add").arg(".").assert().success();
+    git_cmd(&repo_path)
+        .arg("commit")
+        .arg("-m")
+        .arg("Add test file")
+        .assert()
+        .success();
+
+    let mut filters = context.filters();
+    filters.extend([(r"[a-f0-9]{40}", "[COMMIT_SHA]")]);
+
+    cmd_snapshot!(filters, context.try_repo().current_dir(&repo_path).arg(".").arg("--all-files"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Using generated `prek.toml`:
+    [[repos]]
+    repo = "."
+    rev = "[COMMIT_SHA]"
+    hooks = [
+      { id = "test-hook" },
+      { id = "another-hook" },
+    ]
+
+    Test Hook................................................................Passed
+    Another Hook.............................................................Passed
+
+    ----- stderr -----
+    "#);
+
+    Ok(())
+}
+
+#[test]
+fn try_repo_builtin_hook() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.work_dir().child("test.txt").write_str("test\n")?;
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.try_repo().arg("builtin").arg("check-merge-conflict").arg("--all-files"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Using generated `prek.toml`:
+    [[repos]]
+    repo = "builtin"
+    hooks = [
+      { id = "check-merge-conflict" },
+    ]
+
+    check for merge conflicts................................................Passed
+
+    ----- stderr -----
+    "#);
+
+    Ok(())
+}
+
+#[test]
+fn try_repo_meta_hook() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.work_dir().child("test.txt").write_str("test\n")?;
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.try_repo().arg("meta").arg("identity").arg("--all-files"), @r#"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Using generated `prek.toml`:
+    [[repos]]
+    repo = "meta"
+    hooks = [
+      { id = "identity" },
+    ]
+
+    identity.................................................................Passed
+    - hook id: identity
+    - duration: [TIME]
+
+      test.txt
 
     ----- stderr -----
     "#);

@@ -11,20 +11,33 @@ This page documents the configuration keys that `prek` understands.
 
 This file stores user-level `prek` settings and does not define project hooks.
 
-### Global `update.cooldown_days`
+### Global `update`
 
-Default cooldown for [`prek update`](cli.md#prek-update).
+User-level defaults for [`prek update`](cli.md#prek-update):
 
-- Type: integer days, `0` to `255`
-- Default: `0`
-- CLI override: [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
+| Key | Type | Default | CLI override |
+| -- | -- | -- | -- |
+| `update.cooldown_days` | integer days, `0` to `255` | `0` | [`--cooldown-days <DAYS>`](cli.md#prek-update) |
+| `update.freeze` | boolean | `false` | [`--freeze`](cli.md#prek-update--freeze), which forces freezing on |
+| `update.include_tags` | glob string or list of glob strings | empty | [`--include-tag`](cli.md#prek-update--include-tag) |
+| `update.exclude_tags` | glob string or list of glob strings | empty | [`--exclude-tag`](cli.md#prek-update--exclude-tag) |
 
 ```toml
 [update]
 cooldown_days = 7
+freeze = true
+include_tags = "v*"
+exclude_tags = ["*-{alpha,beta,rc}*"]
 ```
 
-The age is computed from the tag creation timestamp for annotated tags, or from the tagged commit timestamp for lightweight tags. A value of `0` disables the cooldown check.
+Each field is resolved independently with this precedence:
+
+1. the corresponding CLI option, when provided
+2. [project `update`](#update)
+3. user-level global config
+4. the default shown above
+
+The cooldown age is computed from the tag creation timestamp for annotated tags, or from the tagged commit timestamp for lightweight tags. A value of `0` disables the cooldown check.
 
 !!! tip "Cooldowns never downgrade"
 
@@ -32,14 +45,7 @@ The age is computed from the tag creation timestamp for annotated tags, or from 
 
 !!! note "Compatibility alias"
 
-    The legacy `auto_update.cooldown_days` key is still accepted as an alias.
-
-Project configs can also set [`update.cooldown_days`](#updatecooldown_days). The effective precedence is:
-
-1. [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
-2. project config
-3. user-level global config
-4. default `0`
+    The legacy `auto_update` key is still accepted as an alias for `update`.
 
 ## Top-level keys
 
@@ -55,6 +61,24 @@ Each entry is one of:
 - `repo: builtin` for `prek`'s built-in fast hooks
 
 See [Repo entries](#repo-entries).
+
+### `priorities`
+
+!!! note "prek-only"
+
+    Priority aliases are a `prek` extension and do not exist in upstream `pre-commit`.
+
+An optional mapping that declares configuration-local aliases for non-negative integer priorities.
+A hook can use one of these aliases in its [`priority`](#priority) field instead of repeating the
+integer.
+
+- Type: mapping from string to non-negative integer
+- Default: empty mapping
+- Scope: the current project configuration only
+- Aliases: non-empty, case-sensitive strings without whitespace
+
+Different aliases may map to the same integer. Unused declarations are allowed. Referencing an
+alias that is not declared in the current configuration is an error.
 
 <a id="top-level-files"></a>
 
@@ -325,23 +349,36 @@ Allowed values:
 - `pre-merge-commit`
 - `pre-rebase`
 
-### `update.cooldown_days`
+### `update`
 
 !!! note "prek-only"
 
     This top-level key is a `prek` extension and is not recognized by upstream `pre-commit`.
 
-Project default cooldown for [`prek update`](cli.md#prek-update).
+Project settings for [`prek update`](cli.md#prek-update):
 
-- Type: integer days, `0` to `255`
-- Default: inherited from the user-level global config, or `0`
-- CLI override: [`prek update --cooldown-days <DAYS>`](cli.md#prek-update)
+| Key | Type | Default or behavior |
+| -- | -- | -- |
+| `update.cooldown_days` | integer days, `0` to `255` | Inherited from the global config, or `0`. |
+| `update.freeze` | boolean | Inherited from the global config, or `false`. |
+| `update.include_tags` | glob string or list of glob strings | Inherited from the global config, or empty. Only consider matching tags. |
+| `update.exclude_tags` | glob string or list of glob strings | Inherited from the global config, or empty. Ignore matching tags. |
+| `update.repos` | map from repo to tag-filter fields | Override tag filters for a repository whose configured `repo` value exactly matches the map key. |
 
 === "prek.toml"
 
     ```toml
     [update]
     cooldown_days = 7
+    freeze = false
+    include_tags = "v*"
+    exclude_tags = ["*-{alpha,beta,rc}*"]
+
+    [update.repos."https://github.com/example/hooks"]
+    include_tags = ["v1.*", "v2.*"]
+
+    [update.repos."https://github.com/lycheeverse/lychee"]
+    exclude_tags = ["nightly", "*-rc*", "*-dev*"]
     ```
 
 === ".pre-commit-config.yaml"
@@ -349,13 +386,25 @@ Project default cooldown for [`prek update`](cli.md#prek-update).
     ```yaml
     update:
       cooldown_days: 7
+      freeze: false
+      include_tags: "v*"
+      exclude_tags: ["*-{alpha,beta,rc}*"]
+      repos:
+        "https://github.com/example/hooks":
+          include_tags: ["v1.*", "v2.*"]
+        "https://github.com/lycheeverse/lychee":
+          exclude_tags: ["nightly", "*-rc*", "*-dev*"]
     ```
+
+Each project-level field overrides the corresponding [global `update`](#global-update) field. Within `update.repos`, `include_tags` and `exclude_tags` are resolved independently: an omitted field inherits the project default, a present field replaces it, and `[]` explicitly clears it. This allows one repository to override only `include_tags` while still inheriting `exclude_tags`.
+
+CLI filters have the highest precedence. `--include-tag` and `--exclude-tag` replace the configured effective defaults; `--repo-include-tag` then replaces the include filters for its named repository, while `--repo-exclude-tag` adds excludes for its named repository.
+
+In workspace mode, `update` is scoped to the project config file that defines it and is not inherited by nested projects. Sub-projects use their own `update`, then the user-level global config, then built-in defaults. Repositories shared by multiple projects are fetched once but evaluated with each project's cooldown, freeze, and tag-filter settings.
 
 !!! note "Compatibility alias"
 
-    The legacy `auto_update.cooldown_days` key is still accepted as an alias.
-
-In workspace mode, this setting is scoped to the project config file that defines it. It applies only to that project and is not inherited by nested projects. Sub-projects use their own `update` setting, then the user-level global config, then the default. If two projects use the same repo URL with different cooldown settings, [`prek update`](cli.md#prek-update) fetches the repo once but evaluates each project with its own cooldown.
+    The legacy `auto_update` key is still accepted as an alias for `update`.
 
 ### `minimum_prek_version`
 
@@ -791,7 +840,7 @@ How `prek` should run the hook (and whether it should create a managed environme
 - Optional override for remote hooks.
 - Not allowed (except as `system`) for `repo: meta` and `repo: builtin`.
 
-Common values include `system`, `python`, `node`, `rust`, `golang`, `ruby`, and `docker`.
+Common values include `system`, `python`, `node`, `php`, `rust`, `golang`, `ruby`, and `docker`.
 
 See [Language Support](../languages.md) for per-language behavior, supported values, and [`language_version`](#language_version) details.
 
@@ -1183,12 +1232,15 @@ This is useful for tools that use global caches/locks or otherwise can’t handl
 
     `priority` controls `prek`'s scheduler and does not exist in upstream `pre-commit`.
 
-Each hook can set an explicit `priority` (a non-negative integer) that controls when it runs and with which hooks it may execute in parallel.
+Each hook can set an explicit `priority` that controls when it runs and with which hooks it may
+execute in parallel. The value may be either a non-negative integer or a [priority
+alias](#priorities) declared by the current configuration.
 
 Scope:
 
 - `priority` is evaluated **within a single configuration file** and is compared across **all hooks in that file**, even if they appear under different `repos:` entries.
 - `priority` does **not** coordinate across different config files. In workspace mode, each project’s config file is scheduled independently.
+- Numeric priorities and aliases can be mixed. Aliases resolve to their declared integer before scheduling.
 
 Hooks run in ascending priority order: **lower `priority` values run earlier**. Hooks that share the same `priority` value run concurrently, subject to `PREK_CONCURRENT_HOOKS`.
 
@@ -1199,6 +1251,11 @@ Example:
 === "prek.toml"
 
     ```toml
+    [priorities]
+    format = 0
+    checks = 10
+    tests = 20
+
     [[repos]]
     repo = "local"
     hooks = [
@@ -1208,7 +1265,7 @@ Example:
         language = "system",
         entry = "python3 -m ruff format",
         always_run = true,
-        priority = 0,
+        priority = "format",
       },
       {
         id = "lint",
@@ -1216,7 +1273,7 @@ Example:
         language = "system",
         entry = "python3 -m ruff check",
         always_run = true,
-        priority = 10,
+        priority = "checks",
       },
       {
         id = "tests",
@@ -1224,7 +1281,7 @@ Example:
         language = "system",
         entry = "just test",
         always_run = true,
-        priority = 20,
+        priority = "tests",
       },
     ]
     ```
@@ -1232,6 +1289,11 @@ Example:
 === ".pre-commit-config.yaml"
 
     ```yaml
+    priorities:
+      format: 0
+      checks: 10
+      tests: 20
+
     repos:
       - repo: local
         hooks:
@@ -1240,21 +1302,21 @@ Example:
             language: system
             entry: python3 -m ruff format
             always_run: true
-            priority: 0
+            priority: format
 
           - id: lint
             name: Lint
             language: system
             entry: python3 -m ruff check
             always_run: true
-            priority: 10
+            priority: checks
 
           - id: tests
             name: Tests
             language: system
             entry: just test
             always_run: true
-            priority: 20
+            priority: tests
     ```
 
 !!! danger "Parallel hooks modifying files"
@@ -1272,6 +1334,11 @@ Example:
 
     [`require_serial`](#require_serial) set to `true` prevents concurrent batches of the *same hook*.
     It does not prevent other hooks from running alongside it; use a unique `priority` if you need exclusivity.
+
+!!! note "Priority aliases are not hook groups"
+
+    Priority aliases control scheduling. [`groups`](#groups) select which hooks run and have no
+    ordering or concurrency meaning.
 
 ### `fail_fast`
 

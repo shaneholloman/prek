@@ -1,5 +1,5 @@
 use std::cmp::max;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -123,23 +123,18 @@ static PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
 // https://github.com/uutils/findutils/blob/af48c151fe9b29cb7d25471b5388013ca15748ba/src/xargs/mod.rs#L177
 // https://github.com/sharkdp/argmax
 fn platform_max_cli_length() -> usize {
-    #[cfg(unix)]
-    {
-        let mut arg_max = *ARG_MAX;
-        // Assume arguments are counted with the granularity of a single page,
-        // so allow a one page cushion to account for rounding up
-        arg_max -= *PAGE_SIZE;
-        // POSIX recommends an additional 2048 bytes of headroom
-        arg_max -= ARG_HEADROOM;
-        arg_max.clamp(1 << 12, 1 << 20)
-    }
-    #[cfg(windows)]
-    {
-        (1 << 15) - ARG_HEADROOM // UNICODE_STRING max - headroom
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        1 << 12
+    cfg_select! {
+        unix => {
+            let mut arg_max = *ARG_MAX;
+            // Assume arguments are counted with the granularity of a single page,
+            // so allow a one page cushion to account for rounding up
+            arg_max -= *PAGE_SIZE;
+            // POSIX recommends an additional 2048 bytes of headroom
+            arg_max -= ARG_HEADROOM;
+            arg_max.clamp(1 << 12, 1 << 20)
+        },
+        windows => (1 << 15) - ARG_HEADROOM, // UNICODE_STRING max - headroom
+        _ => 1 << 12,
     }
 }
 
@@ -167,7 +162,7 @@ fn env_size(override_envs: &FxHashMap<String, String>) -> usize {
 impl<'a> Partitions<'a> {
     fn split(
         hook: &'a Hook,
-        entry: &'a [String],
+        entry: &[OsString],
         filenames: &'a [&'a Path],
         concurrency: usize,
     ) -> anyhow::Result<Self> {
@@ -194,11 +189,8 @@ impl<'a> Partitions<'a> {
             arg_max -= POINTER_SIZE_CONSERVATIVE;
         }
 
-        let args_size = entry
-            .iter()
-            .chain(hook.args.iter())
-            .map(arg_size)
-            .sum::<usize>()
+        let args_size = entry.iter().map(arg_size).sum::<usize>()
+            + hook.args.iter().map(arg_size).sum::<usize>()
             + POINTER_SIZE_CONSERVATIVE; // terminating NULL
 
         if args_size >= arg_max {
@@ -265,7 +257,7 @@ impl<'a> Iterator for Partitions<'a> {
 pub(crate) async fn run_by_batch<T, F>(
     hook: &Hook,
     filenames: &[&Path],
-    entry: &[String],
+    entry: &[OsString],
     run: F,
 ) -> anyhow::Result<Vec<T>>
 where

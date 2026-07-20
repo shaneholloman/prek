@@ -14,8 +14,10 @@ use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
+use crate::fs::is_executable;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::languages::rust::RustRequest;
 use crate::languages::rust::installer::RustInstaller;
 use crate::languages::rust::rustup::Rustup;
@@ -192,8 +194,8 @@ async fn find_package_dir(
 }
 
 /// Check if two names match, accounting for hyphen/underscore normalization.
-fn names_match(a: &str, b: &str) -> bool {
-    a == b || a.replace('-', "_") == b.replace('-', "_")
+fn names_match(name: &str, binary_name: &str) -> bool {
+    name == binary_name || name.replace('-', "_") == binary_name.replace('-', "_")
 }
 
 /// Check if a package produces a binary with the given name.
@@ -210,32 +212,17 @@ async fn copy_binaries(release_dir: &Path, dest_bin_dir: &Path) -> anyhow::Resul
     let mut entries = fs_err::tokio::read_dir(release_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        let file_type = entry.file_type().await?;
+        if let Some(ext) = path.extension() {
+            // Skip non-binary files like .d, .rlib, etc.
+            if ext == "d" || ext == "rlib" || ext == "rmeta" {
+                continue;
+            }
+        }
+
         // Copy executable files (not directories, not .d files, etc.)
-        if file_type.is_file() {
-            if let Some(ext) = path.extension() {
-                // Skip non-binary files like .d, .rlib, etc.
-                if ext == "d" || ext == "rlib" || ext == "rmeta" {
-                    continue;
-                }
-            }
-            // On Unix, check if it's executable; on Windows, check for .exe
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let meta = entry.metadata().await?;
-                if meta.permissions().mode() & 0o111 != 0 {
-                    let dest = dest_bin_dir.join(entry.file_name());
-                    fs_err::tokio::copy(&path, &dest).await?;
-                }
-            }
-            #[cfg(windows)]
-            {
-                if path.extension().is_some_and(|e| e == "exe") {
-                    let dest = dest_bin_dir.join(entry.file_name());
-                    fs_err::tokio::copy(&path, &dest).await?;
-                }
-            }
+        if is_executable(&path) {
+            let dest = dest_bin_dir.join(entry.file_name());
+            fs_err::tokio::copy(&path, &dest).await?;
         }
     }
     Ok(())
@@ -265,9 +252,7 @@ async fn install_local_project(
         }
         Ok(Some((package_dir, package_name, is_workspace))) => {
             debug!(
-                "Found package `{}` for binary `{}` in repo `{}` at `{}`",
-                package_name,
-                hook_binary,
+                "Found package `{package_name}` for binary `{hook_binary}` in repo `{}` at `{}`",
                 repo_path.display(),
                 package_dir.display(),
             );
@@ -275,8 +260,7 @@ async fn install_local_project(
         }
         Ok(None) => {
             debug!(
-                "Binary `{}` not found in cargo metadata for repo `{}`, falling back to repo root",
-                hook_binary,
+                "Binary `{hook_binary}` not found in cargo metadata for repo `{}`, falling back to repo root",
                 repo_path.display(),
             );
             (repo_path.to_path_buf(), String::new(), false)
@@ -292,7 +276,7 @@ async fn install_local_project(
             .current_dir(&package_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .remove_git_envs()
+            .isolate_from_git_env()
             .check(true)
             .output()
             .await?;
@@ -341,7 +325,7 @@ async fn install_local_project(
         cmd.current_dir(&manifest_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .remove_git_envs()
+            .isolate_from_git_env()
             .check(true)
             .output()
             .await?;
@@ -364,7 +348,7 @@ async fn install_local_project(
         cmd.current_dir(&package_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .remove_git_envs()
+            .isolate_from_git_env()
             .check(true)
             .output()
             .await?;
@@ -397,7 +381,7 @@ async fn install_cli_dependency(
 
     cmd.env(EnvVars::PATH, new_path)
         .env(EnvVars::CARGO_HOME, cargo_home)
-        .remove_git_envs()
+        .isolate_from_git_env()
         .check(true)
         .output()
         .await?;
@@ -408,11 +392,12 @@ async fn install_cli_dependency(
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct Rust;
 
-impl LanguageImpl for Rust {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Rust {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> anyhow::Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -438,11 +423,7 @@ impl LanguageImpl for Rust {
         // Add toolchain bin to PATH, for cargo to use correct rustc
         let new_path = prepend_paths(&[&rustc_bin]).context("Failed to join PATH")?;
 
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
         info.with_toolchain(rust.toolchain().to_path_buf())
             .with_language_version(rust.version().deref().clone());
 
@@ -474,7 +455,9 @@ impl LanguageImpl for Rust {
 
         // Use the hook entry as the binary name to find the package, this could be improved by allowing an explicit binary name in the hook config.
         let hook_entry = hook.entry.expect_direct().split()?;
-        let hook_bin = &hook_entry[0];
+        let hook_bin = hook_entry[0]
+            .to_str()
+            .context("Rust hook entry binary must be valid UTF-8")?;
 
         // Install library dependencies and local project
         if let Some(repo) = hook.repo_path() {
@@ -511,9 +494,9 @@ impl LanguageImpl for Rust {
 
     async fn run(
         &self,
+        store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        store: &Store,
         reporter: &HookRunReporter,
     ) -> anyhow::Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

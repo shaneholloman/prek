@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -11,9 +11,9 @@ use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::hook::InstalledHook;
 use crate::hook::{Hook, InstallInfo};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::languages::node::NodeRequest;
-use crate::languages::node::installer::{NodeInstaller, NodeResult, bin_dir, lib_dir};
+use crate::languages::node::installer::{NodeInstaller, bin_dir, lib_dir, query_node_version};
 use crate::languages::node::version::EXTRA_KEY_LTS;
 use crate::languages::version::LanguageRequest;
 use crate::process::Cmd;
@@ -40,11 +40,12 @@ const NPM_CONFIG_ENVS_TO_REMOVE: &[&str] = &[
     "npm_config_cache",
 ];
 
-impl LanguageImpl for Node {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Node {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -70,11 +71,7 @@ impl LanguageImpl for Node {
             .await
             .context("Failed to install node")?;
 
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
 
         let lts = serde_json::to_string(&node.version().lts).context("Failed to serialize LTS")?;
         info.with_toolchain(node.node().to_path_buf());
@@ -133,16 +130,15 @@ impl LanguageImpl for Node {
     }
 
     async fn check_health(&self, info: &InstallInfo) -> Result<()> {
-        let node = NodeResult::from_executables(info.toolchain.clone(), PathBuf::new())
-            .fill_version()
+        let version = query_node_version(&info.toolchain)
             .await
             .context("Failed to query node version")?;
 
-        if node.version().version != info.language_version {
+        if version.version != info.language_version {
             anyhow::bail!(
                 "Node version mismatch: expected {}, found {}",
                 info.language_version,
-                node.version().version
+                version.version
             );
         }
 
@@ -151,9 +147,9 @@ impl LanguageImpl for Node {
 
     async fn run(
         &self,
+        store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        store: &Store,
         reporter: &HookRunReporter,
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

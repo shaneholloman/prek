@@ -11,10 +11,10 @@ use tracing::debug;
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::languages::ruby::RubyRequest;
 use crate::languages::ruby::gem::{build_gemspecs, install_gems};
-use crate::languages::ruby::installer::{RubyInstaller, query_ruby_info};
+use crate::languages::ruby::installer::{RubyInstaller, query_ruby_version};
 use crate::languages::version::LanguageRequest;
 use crate::process::Cmd;
 use crate::run::run_by_batch;
@@ -23,11 +23,12 @@ use crate::store::{Store, ToolBucket};
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct Ruby;
 
-impl LanguageImpl for Ruby {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Ruby {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -48,17 +49,10 @@ impl LanguageImpl for Ruby {
             .context("Failed to install Ruby")?;
 
         // 2. Create InstallInfo
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
 
         info.with_toolchain(ruby.ruby_bin().to_path_buf())
             .with_language_version(ruby.version().clone());
-
-        // Store Ruby engine in metadata
-        info.with_extra("ruby_engine", ruby.engine());
 
         // 3. Create environment directories
         let gem_home = gem_home(&info.env_path);
@@ -70,8 +64,8 @@ impl LanguageImpl for Ruby {
         if let Some(repo_path) = hook.repo_path() {
             // Try to build gemspecs, but don't fail if there aren't any
             match build_gemspecs(&ruby, repo_path).await {
-                Ok(gem_files) => {
-                    debug!("Built {} gem(s) from gemspecs", gem_files.len());
+                Ok(count) => {
+                    debug!("Built {count} gem(s) from gemspecs");
                 }
                 Err(e) if e.to_string().contains("No .gemspec files") => {
                     debug!("No gemspecs found in repo, skipping gem build");
@@ -107,7 +101,7 @@ impl LanguageImpl for Ruby {
 
     async fn check_health(&self, info: &InstallInfo) -> Result<()> {
         // 1. Verify Ruby runs and reports correct version
-        let (actual_version, _) = query_ruby_info(&info.toolchain)
+        let actual_version = query_ruby_version(&info.toolchain)
             .await
             .context("Failed to query Ruby info")?;
 
@@ -134,9 +128,9 @@ impl LanguageImpl for Ruby {
 
     async fn run(
         &self,
+        store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        store: &Store,
         reporter: &HookRunReporter,
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

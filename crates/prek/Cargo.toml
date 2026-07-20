@@ -31,6 +31,7 @@ annotate-snippets = { workspace = true }
 anstream = { workspace = true }
 anstyle-query = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 async-compression = { workspace = true }
 async_zip = { workspace = true }
 axoupdater = { workspace = true, optional = true }
@@ -60,8 +61,8 @@ liblzma = { workspace = true }
 mea = { workspace = true }
 memchr = { workspace = true }
 owo-colors = { workspace = true }
-quick-xml = { workspace = true }
 regex = { workspace = true }
+regex-automata = { workspace = true }
 reqwest = { workspace = true }
 aws-lc-rs = { workspace = true }
 rustc-hash = { workspace = true }
@@ -90,8 +91,9 @@ unicode-width = { workspace = true }
 walkdir = { workspace = true }
 webpki-root-certs = { workspace = true }
 which = { workspace = true }
+xml = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 prek-pty = { workspace = true }
 
 libc = { workspace = true }

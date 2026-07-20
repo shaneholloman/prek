@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageImpl;
+use crate::languages::LanguageBackend;
 use crate::languages::dotnet::DotnetRequest;
 use crate::languages::dotnet::installer::{DotnetInstaller, DotnetResult};
 use crate::languages::version::LanguageRequest;
@@ -38,11 +38,12 @@ fn resolve_dotnet_root(dotnet: &Path) -> Result<PathBuf> {
         .context("dotnet executable must have parent")
 }
 
-impl LanguageImpl for Dotnet {
+#[async_trait::async_trait(?Send)]
+impl LanguageBackend for Dotnet {
     async fn install(
         &self,
-        hook: Arc<Hook>,
         store: &Store,
+        hook: Arc<Hook>,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -58,11 +59,7 @@ impl LanguageImpl for Dotnet {
             .await
             .context("Failed to install dotnet SDK")?;
 
-        let mut info = InstallInfo::new(
-            hook.language,
-            hook.env_key_dependencies().clone(),
-            &store.hooks_dir(),
-        )?;
+        let mut info = InstallInfo::new(&hook, &store.hooks_dir())?;
 
         let tools_dir = tools_dir(&info.env_path);
 
@@ -91,7 +88,6 @@ impl LanguageImpl for Dotnet {
 
     async fn check_health(&self, info: &InstallInfo) -> Result<()> {
         let current_version = DotnetResult::from_executable(info.toolchain.clone())
-            .fill_version()
             .await
             .context("Failed to query current dotnet info")?;
 
@@ -113,9 +109,9 @@ impl LanguageImpl for Dotnet {
 
     async fn run(
         &self,
+        store: &Store,
         hook: &InstalledHook,
         filenames: &[&Path],
-        store: &Store,
         reporter: &HookRunReporter,
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());

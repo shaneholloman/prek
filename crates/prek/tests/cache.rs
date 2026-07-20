@@ -1,11 +1,12 @@
+use assert_cmd::assert::OutputAssertExt;
 use assert_fs::assert::PathAssert;
 use assert_fs::fixture::{ChildPath, PathChild, PathCreateDir};
 use assert_fs::prelude::FileWriteStr;
-use prek_consts::PRE_COMMIT_CONFIG_YAML;
+use prek_consts::{PRE_COMMIT_CONFIG_YAML, PRE_COMMIT_HOOKS_YAML};
 use serde_json::json;
 use std::time::{Duration, SystemTime};
 
-use crate::common::{TestContext, cmd_snapshot};
+use crate::common::{TestContext, cmd_snapshot, git_cmd};
 
 mod common;
 
@@ -101,6 +102,64 @@ fn cache_gc_verbose_shows_removed_entries() {
 
     ----- stderr -----
     ");
+}
+
+#[test]
+fn cache_gc_removes_legacy_hook_env_when_config_matches() -> anyhow::Result<()> {
+    let context = TestContext::new();
+    context.write_pre_commit_config(indoc::indoc! {r#"
+        repos:
+          - repo: local
+            hooks:
+              - id: local-python
+                name: Local Python Hook
+                entry: "python -c \"print(1)\""
+                language: python
+    "#});
+
+    let home = context.home_dir();
+    let config_path = context.work_dir().child(PRE_COMMIT_CONFIG_YAML);
+    write_config_tracking_file(home, &[config_path.path()])?;
+    let legacy_env = home.child("hooks/python-legacy");
+    let current_env = home.child("hooks/python-current");
+    legacy_env.create_dir_all()?;
+    current_env.create_dir_all()?;
+
+    legacy_env
+        .child(".prek-hook.json")
+        .write_str(&serde_json::to_string_pretty(&json!({
+            "language": "python",
+            "language_version": "3.12.0",
+            "dependencies": [],
+            "env_path": legacy_env.path(),
+            "toolchain": "/usr/bin/python3",
+            "extra": {},
+        }))?)?;
+    current_env
+        .child(".prek-hook.json")
+        .write_str(&serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "language": "python",
+            "language_version": "3.12.0",
+            "dependencies": [],
+            "env_path": current_env.path(),
+            "toolchain": "/usr/bin/python3",
+            "extra": {},
+        }))?)?;
+
+    cmd_snapshot!(context.filters(), context.command().args(["cache", "gc"]), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Removed 1 hook env ([SIZE])
+
+    ----- stderr -----
+    ");
+
+    legacy_env.assert(predicates::path::missing());
+    current_env.assert(predicates::path::is_dir());
+
+    Ok(())
 }
 
 #[test]
@@ -252,6 +311,80 @@ fn cache_gc_removes_unreferenced_entries() -> anyhow::Result<()> {
 }
 
 #[test]
+fn cache_gc_keeps_relative_remote_repo() -> anyhow::Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    let hook_repo = context.work_dir().child("hook-repo");
+    hook_repo.create_dir_all()?;
+    git_cmd(&hook_repo).args(["init"]).assert().success();
+    hook_repo
+        .child(PRE_COMMIT_HOOKS_YAML)
+        .write_str(indoc::indoc! {r"
+        - id: test-hook
+          name: Test Hook
+          entry: echo test
+          language: system
+          always_run: true
+    "})?;
+    git_cmd(&hook_repo).args(["add", "."]).assert().success();
+    git_cmd(&hook_repo)
+        .args(["commit", "-m", "Initial commit"])
+        .assert()
+        .success();
+    let output = git_cmd(&hook_repo).args(["rev-parse", "HEAD"]).output()?;
+    let revision = String::from_utf8(output.stdout)?.trim().to_string();
+
+    let subproject = context.work_dir().child("subproject");
+    subproject.create_dir_all()?;
+    subproject
+        .child(PRE_COMMIT_CONFIG_YAML)
+        .write_str(&indoc::formatdoc! {r"
+            repos:
+              - repo: ../hook-repo
+                rev: {revision}
+                hooks:
+                  - id: test-hook
+        "})?;
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run()
+        .arg("--config")
+        .arg("subproject/.pre-commit-config.yaml"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Test Hook................................................................Passed
+
+    ----- stderr -----
+    ");
+
+    let repos_dir = context.home_dir().child("repos");
+    let cached_repo = fs_err::read_dir(repos_dir.path())?
+        .next()
+        .transpose()?
+        .expect("expected the relative remote repo to be cached")
+        .path();
+    repos_dir.child("unused-repo").create_dir_all()?;
+
+    cmd_snapshot!(context.filters(), context.command().args(["cache", "gc"]), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Removed 1 repo ([SIZE])
+
+    ----- stderr -----
+    ");
+
+    assert!(cached_repo.is_dir(), "cache GC removed the configured repo");
+    repos_dir
+        .child("unused-repo")
+        .assert(predicates::path::missing());
+
+    Ok(())
+}
+
+#[test]
 fn cache_gc_prunes_unused_tool_versions() -> anyhow::Result<()> {
     let context = TestContext::new();
 
@@ -321,6 +454,7 @@ fn cache_gc_prunes_unused_tool_versions() -> anyhow::Result<()> {
 
     // Match logic for local hooks: empty deps + language request is `Any` by default.
     let marker_py = json!({
+        "schema_version": 1,
         "language": "python",
         "language_version": "3.12.0",
         "dependencies": [],
@@ -333,6 +467,7 @@ fn cache_gc_prunes_unused_tool_versions() -> anyhow::Result<()> {
         .write_str(&serde_json::to_string_pretty(&marker_py)?)?;
 
     let marker_node = json!({
+        "schema_version": 1,
         "language": "node",
         "language_version": "22.0.0",
         "dependencies": [],
@@ -345,6 +480,7 @@ fn cache_gc_prunes_unused_tool_versions() -> anyhow::Result<()> {
         .write_str(&serde_json::to_string_pretty(&marker_node)?)?;
 
     let marker_go = json!({
+        "schema_version": 1,
         "language": "golang",
         "language_version": "1.24.0",
         "dependencies": [],
@@ -431,6 +567,7 @@ fn cache_gc_prunes_tool_versions_without_positive_identification() -> anyhow::Re
     let env_py = home.child("hooks/python-keep");
     env_py.create_dir_all()?;
     let marker_py = json!({
+        "schema_version": 1,
         "language": "python",
         "language_version": "3.12.0",
         "dependencies": [],
