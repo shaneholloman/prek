@@ -3,7 +3,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use anstream::ColorChoice;
 use futures_util::{StreamExt, TryStreamExt};
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use rustc_hash::FxHashMap;
@@ -12,14 +11,6 @@ use tracing::trace;
 use crate::config::PassFilenames;
 use crate::hook::Hook;
 use crate::warn_user;
-
-pub(crate) static USE_COLOR: LazyLock<bool> =
-    LazyLock::new(|| match anstream::Stderr::choice(&std::io::stderr()) {
-        ColorChoice::Always | ColorChoice::AlwaysAnsi => true,
-        ColorChoice::Never => false,
-        // We just asked anstream for a choice, that can't be auto
-        ColorChoice::Auto => unreachable!(),
-    });
 
 fn cpu_count() -> usize {
     std::thread::available_parallelism()
@@ -32,23 +23,16 @@ fn resolve_concurrency(env_vars: &impl EnvVarsRead, primary_env_var: &str) -> us
         return 1;
     }
 
-    let primary = env_vars.var(primary_env_var).ok();
-    let legacy_max = env_vars.var(EnvVars::PREK_MAX_CONCURRENCY).ok();
-    let (name, value) = if let Some(primary) = primary.as_deref() {
-        (primary_env_var, Some(primary))
-    } else {
-        (EnvVars::PREK_MAX_CONCURRENCY, legacy_max.as_deref())
-    };
-
     let cpu = cpu_count();
-    if let Some(value) = value {
-        if let Ok(cap) = value.parse::<usize>() {
-            return cap.max(1);
-        }
-        warn_user!(
-            "Invalid value for {name}: {value:?}. Expected a positive integer; using default ({cpu})"
-        );
+    let Ok(value) = env_vars.var(primary_env_var) else {
+        return cpu;
+    };
+    if let Ok(cap) = value.parse::<usize>() {
+        return cap.max(1);
     }
+    warn_user!(
+        "Invalid value for {primary_env_var}: {value:?}. Expected a positive integer; using default ({cpu})"
+    );
 
     cpu
 }
@@ -254,15 +238,32 @@ impl<'a> Iterator for Partitions<'a> {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct HookRunOutput {
+    exit_code: i32,
+    output: Vec<u8>,
+}
+
+impl HookRunOutput {
+    pub(crate) fn new(exit_code: i32, output: Vec<u8>) -> Self {
+        Self { exit_code, output }
+    }
+
+    fn append(&mut self, output: Self) {
+        self.exit_code |= output.exit_code;
+        self.output.extend(output.output);
+    }
+}
+
 pub(crate) async fn run_by_batch<T, F>(
     hook: &Hook,
     filenames: &[&Path],
     entry: &[OsString],
     run: F,
-) -> anyhow::Result<Vec<T>>
+) -> anyhow::Result<(i32, Vec<u8>)>
 where
     F: for<'a> AsyncFn(&'a [&'a Path]) -> anyhow::Result<T>,
-    T: Send + 'static,
+    T: Into<HookRunOutput> + Send + 'static,
 {
     let concurrency = if hook.require_serial {
         1
@@ -280,19 +281,43 @@ where
     );
 
     #[allow(clippy::redundant_closure)]
-    let results: Vec<_> = futures_util::stream::iter(partitions)
+    let output = futures_util::stream::iter(partitions)
         .map(|batch| run(batch))
         .buffered(concurrency)
-        .try_collect()
+        .try_fold(
+            HookRunOutput::default(),
+            |mut combined, output| async move {
+                combined.append(output.into());
+                anyhow::Ok(combined)
+            },
+        )
         .await?;
 
-    Ok(results)
+    Ok((output.exit_code, output.output))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn hook_run_output_append_bitwise_ors_exit_codes() {
+        let mut output = HookRunOutput::new(1, Vec::new());
+
+        output.append(HookRunOutput::new(3, Vec::new()));
+
+        assert_eq!(output.exit_code, 3);
+    }
+
+    #[test]
+    fn hook_run_output_append_preserves_output_order() {
+        let mut output = HookRunOutput::new(0, b"first".to_vec());
+
+        output.append(HookRunOutput::new(0, b"second".to_vec()));
+
+        assert_eq!(output.output, b"firstsecond");
+    }
 
     fn resolve_concurrency_from_map(values: &[(&str, &str)], primary_env_var: &str) -> usize {
         resolve_concurrency(&EnvVars::from_map(values), primary_env_var)
@@ -442,36 +467,10 @@ mod tests {
                 &[
                     (EnvVars::PREK_NO_CONCURRENCY, "1"),
                     (EnvVars::PREK_CONCURRENT_HOOKS, "8"),
-                    (EnvVars::PREK_MAX_CONCURRENCY, "4"),
                 ],
                 EnvVars::PREK_CONCURRENT_HOOKS,
             ),
             1
-        );
-    }
-
-    #[test]
-    fn test_resolve_concurrency_uses_legacy_max() {
-        assert_eq!(
-            resolve_concurrency_from_map(
-                &[(EnvVars::PREK_MAX_CONCURRENCY, "4")],
-                EnvVars::PREK_CONCURRENT_HOOKS,
-            ),
-            4
-        );
-    }
-
-    #[test]
-    fn test_resolve_concurrency_prefers_new_env_over_legacy_max() {
-        assert_eq!(
-            resolve_concurrency_from_map(
-                &[
-                    (EnvVars::PREK_CONCURRENT_BATCHES, "2"),
-                    (EnvVars::PREK_MAX_CONCURRENCY, "4"),
-                ],
-                EnvVars::PREK_CONCURRENT_BATCHES,
-            ),
-            2
         );
     }
 

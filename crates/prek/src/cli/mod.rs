@@ -17,8 +17,10 @@ mod cache_clean;
 mod cache_gc;
 mod cache_size;
 mod completion;
+mod exec;
 mod hook_impl;
 mod identify;
+mod init;
 mod install;
 mod list;
 mod list_builtins;
@@ -36,8 +38,10 @@ pub(crate) use cache_clean::cache_clean;
 pub(crate) use cache_gc::cache_gc;
 pub(crate) use cache_size::cache_size;
 use completion::selector_completer;
+pub(crate) use exec::exec;
 pub(crate) use hook_impl::hook_impl;
 pub(crate) use identify::identify;
+pub(crate) use init::init;
 pub(crate) use install::{init_template_dir, install, prepare_hooks, uninstall};
 pub(crate) use list::list;
 pub(crate) use list_builtins::list_builtins;
@@ -229,20 +233,16 @@ pub(crate) struct GlobalArgs {
     /// Display the prek version.
     #[arg(global = true, short = 'V', long, action = ArgAction::Version)]
     version: (),
-
-    /// Show the resolved settings for the current command.
-    ///
-    /// This option is used for debugging and development purposes.
-    #[arg(global = true, long, hide = true)]
-    pub show_settings: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Install prek Git shims into Git's effective hooks directory.
+    /// Create a prek configuration and install Git hook shims.
+    Init(InitArgs),
+    /// Install prek Git hook shims.
     ///
-    /// By default this is `.git/hooks/`, but repo-local or worktree-local
-    /// `core.hooksPath` is honored when set.
+    /// The effective hooks directory defaults to `.git/hooks/`, but repo-local
+    /// or worktree-local `core.hooksPath` is honored when set.
     ///
     /// The Git shims installed by this command are determined by `--hook-type`
     /// or `default_install_hook_types` in the config file, falling back to
@@ -251,48 +251,98 @@ pub(crate) enum Command {
     /// A hook's `stages` field does not affect which Git shims this
     /// command installs.
     Install(InstallArgs),
-    /// Prepare environments for all hooks used in the config file.
+    /// Prepare environments for configured hooks.
     ///
     /// This command does not install Git shims. To install the Git shims
     /// along with the hook environments in one command, use `prek install --prepare-hooks`.
     #[command(alias = "install-hooks")]
     PrepareHooks(PrepareHooksArgs),
-    /// Run hooks.
+    /// Run configured hooks.
     Run(Box<RunArgs>),
-    /// List hooks configured in the current workspace.
+    /// Run a command in the environment prepared for a configured hook.
+    Exec(ExecArgs),
+    /// List configured hooks.
     List(ListArgs),
-    /// Uninstall prek Git shims.
+    /// Uninstall prek Git hook shims.
     Uninstall(UninstallArgs),
-    /// Validate configuration files (prek.toml or .pre-commit-config.yaml).
+    /// Validate prek configuration files.
     ValidateConfig(ValidateConfigArgs),
-    /// Validate `.pre-commit-hooks.yaml` files.
+    /// Validate pre-commit hook manifests (`.pre-commit-hooks.yaml`).
     ValidateManifest(ValidateManifestArgs),
-    /// Produce a sample configuration file (prek.toml or .pre-commit-config.yaml).
+    /// Generate a sample prek configuration file.
+    #[command(hide = true)]
     SampleConfig(SampleConfigArgs),
-    /// Update the `rev` field of repositories in the config file to the latest version.
-    #[command(name = "update", aliases = ["auto-update", "autoupdate"])]
+    /// Update configured repositories.
+    #[command(alias = "autoupdate")]
     Update(UpdateArgs),
     /// Manage the prek cache.
     Cache(CacheNamespace),
-    /// Clean unused cached repos.
+    /// Remove unused cached repositories, hook environments, and other data.
     #[command(hide = true)]
     GC(CacheGcArgs),
     /// Remove all prek cached data.
     #[command(hide = true)]
     Clean,
     /// Install Git shims in a directory intended for use with `git config init.templateDir`.
-    #[command(alias = "init-templatedir", hide = true)]
+    #[command(name = "init-templatedir", hide = true)]
     InitTemplateDir(InitTemplateDirArgs),
-    /// Try the pre-commit hooks in the current repo.
+    /// Try hooks from a repository.
     TryRepo(Box<TryRepoArgs>),
     /// The implementation of the prek Git shim that is installed in Git's effective hooks directory.
     #[command(hide = true)]
     HookImpl(HookImplArgs),
-    /// Utility commands.
+    /// Run utility commands.
     Util(UtilNamespace),
-    /// `prek` self management.
+    /// Manage the prek installation.
     #[command(name = "self")]
     Self_(SelfNamespace),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct InitArgs {
+    /// Existing directory to initialize.
+    ///
+    /// Defaults to the current Git worktree root. Relative paths are resolved
+    /// from the current directory after applying `--cd`, and the resolved path
+    /// must be inside the current Git worktree.
+    #[arg(
+        value_name = "PATH",
+        value_hint = ValueHint::DirPath,
+        value_parser = PathBufValueParser::new().map(expand_tilde),
+    )]
+    pub(crate) path: Option<PathBuf>,
+
+    /// Select the configuration format to create.
+    #[arg(long, value_enum, default_value_t = SampleConfigFormat::Toml)]
+    pub(crate) format: SampleConfigFormat,
+
+    /// Do not install Git hook shims.
+    #[arg(long)]
+    pub(crate) no_install: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecArgs {
+    /// Hook whose execution environment should be used.
+    ///
+    /// Supports `hook-id` and `project-path:hook-id` selectors and must resolve
+    /// to exactly one configured hook.
+    #[arg(
+        value_name = "HOOK",
+        value_hint = ValueHint::Other,
+        add = ArgValueCompleter::new(selector_completer)
+    )]
+    pub(crate) selector: String,
+
+    /// Command and arguments to execute.
+    #[arg(
+        value_name = "COMMAND",
+        required = true,
+        num_args = 1..,
+        last = true,
+        value_hint = ValueHint::CommandWithArguments
+    )]
+    pub(crate) command: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -329,9 +379,12 @@ pub(crate) struct InstallArgs {
     #[arg(long = "skip", value_name = "HOOK|PROJECT", add = ArgValueCompleter::new(selector_completer))]
     pub(crate) skips: Vec<String>,
 
-    /// Overwrite existing Git shims.
-    #[arg(short = 'f', long)]
-    pub(crate) overwrite: bool,
+    /// Force installation and overwrite existing Git shims.
+    ///
+    /// If `core.hooksPath` is configured outside this repository, install the
+    /// shims into this repository's default hooks directory.
+    #[arg(short = 'f', long, alias = "overwrite")]
+    pub(crate) force: bool,
 
     /// Also prepare environments for all hooks used in the config file.
     #[arg(long, alias = "install-hooks")]
@@ -467,8 +520,116 @@ pub(crate) struct RunExtraArgs {
     pub(crate) rewrite_command: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Args)]
+#[command(next_help_heading = "File selection")]
+pub(crate) struct FileSelectionArgs {
+    /// Run hooks on all tracked files in the repository.
+    #[arg(short, long, conflicts_with_all = ["files", "glob", "from_ref", "to_ref"])]
+    pub(crate) all_files: bool,
+
+    /// Run hooks on the specified file paths.
+    ///
+    /// Paths are resolved relative to the current working directory after applying `--cd`. They may
+    /// be tracked or untracked. This option accepts multiple paths and can be combined with
+    /// `--glob` and `--directory`.
+    #[arg(
+        long,
+        conflicts_with_all = ["all_files", "from_ref", "to_ref"],
+        num_args = 0..,
+        value_hint = ValueHint::AnyPath)
+    ]
+    pub(crate) files: Vec<String>,
+
+    /// Run hooks on tracked files matching the specified glob pattern.
+    ///
+    /// Patterns are matched against paths relative to the current working directory after applying
+    /// `--cd`. Quote patterns to prevent shell expansion. This option can be repeated and combined
+    /// with `--files` and `--directory`.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        conflicts_with_all = ["all_files", "from_ref", "to_ref"]
+    )]
+    pub(crate) glob: Vec<Glob>,
+
+    /// Run hooks on tracked files under the specified directory.
+    ///
+    /// Paths are resolved relative to the current working directory after applying `--cd`. This
+    /// option can be repeated and combined with `--files` and `--glob`.
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        conflicts_with_all = ["all_files", "from_ref", "to_ref"],
+        value_hint = ValueHint::DirPath
+    )]
+    pub(crate) directory: Vec<String>,
+
+    /// The original ref in a `<from_ref>...<to_ref>` diff expression.
+    /// Files changed in this diff will be run through the hooks.
+    #[arg(short = 's', long, alias = "source", value_hint = ValueHint::Other)]
+    pub(crate) from_ref: Option<String>,
+
+    /// The destination ref in a `from_ref...to_ref` diff expression.
+    /// Defaults to `HEAD` if `from_ref` is specified.
+    #[arg(
+        short = 'o',
+        long,
+        alias = "origin",
+        requires = "from_ref",
+        value_hint = ValueHint::Other,
+        default_value_if("from_ref", ArgPredicate::IsPresent, "HEAD")
+    )]
+    pub(crate) to_ref: Option<String>,
+
+    /// Run hooks against the last commit. Equivalent to `--from-ref HEAD~1 --to-ref HEAD`.
+    #[arg(long, conflicts_with_all = ["all_files", "files", "glob", "directory", "from_ref", "to_ref"])]
+    pub(crate) last_commit: bool,
+}
+
+impl From<FileSelectionArgs> for run::FileSelection {
+    fn from(args: FileSelectionArgs) -> Self {
+        let FileSelectionArgs {
+            all_files,
+            files,
+            glob,
+            directory,
+            from_ref,
+            to_ref,
+            last_commit,
+        } = args;
+
+        if last_commit {
+            return Self::Diff {
+                from_ref: "HEAD~1".to_string(),
+                to_ref: "HEAD".to_string(),
+            };
+        }
+
+        let (from_ref, to_ref) = match (from_ref, to_ref) {
+            (Some(from_ref), Some(to_ref)) => return Self::Diff { from_ref, to_ref },
+            refs => refs,
+        };
+
+        if !files.is_empty() || !glob.is_empty() || !directory.is_empty() {
+            return Self::Explicit {
+                files,
+                globs: glob,
+                directories: directory,
+            };
+        }
+
+        if all_files {
+            Self::All { from_ref, to_ref }
+        } else {
+            Self::Default
+        }
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Args)]
+#[command(next_help_heading = "Hook selection")]
 pub(crate) struct RunOptions {
     /// Include the specified hooks or projects.
     ///
@@ -502,57 +663,15 @@ pub(crate) struct RunOptions {
     #[arg(long = "skip", value_name = "HOOK|PROJECT", add = ArgValueCompleter::new(selector_completer))]
     pub(crate) skips: Vec<String>,
 
-    /// Run on all files in the repo.
-    #[arg(short, long, conflicts_with_all = ["files", "from_ref", "to_ref"])]
-    pub(crate) all_files: bool,
-    /// Specific filenames to run hooks on.
-    #[arg(
-        long,
-        conflicts_with_all = ["all_files", "from_ref", "to_ref"],
-        num_args = 0..,
-        value_hint = ValueHint::AnyPath)
-    ]
-    pub(crate) files: Vec<String>,
-
-    /// Run hooks on all files in the specified directories.
-    ///
-    /// You can specify multiple directories. It can be used in conjunction with `--files`.
-    #[arg(
-        short,
-        long,
-        value_name = "DIR",
-        conflicts_with_all = ["all_files", "from_ref", "to_ref"],
-        value_hint = ValueHint::DirPath
-    )]
-    pub(crate) directory: Vec<String>,
-
-    /// The original ref in a `<from_ref>...<to_ref>` diff expression.
-    /// Files changed in this diff will be run through the hooks.
-    #[arg(short = 's', long, alias = "source", value_hint = ValueHint::Other)]
-    pub(crate) from_ref: Option<String>,
-
-    /// The destination ref in a `from_ref...to_ref` diff expression.
-    /// Defaults to `HEAD` if `from_ref` is specified.
-    #[arg(
-        short = 'o',
-        long,
-        alias = "origin",
-        requires = "from_ref",
-        value_hint = ValueHint::Other,
-        default_value_if("from_ref", ArgPredicate::IsPresent, "HEAD")
-    )]
-    pub(crate) to_ref: Option<String>,
-
-    /// Run hooks against the last commit. Equivalent to `--from-ref HEAD~1 --to-ref HEAD`.
-    #[arg(long, conflicts_with_all = ["all_files", "files", "directory", "from_ref", "to_ref"])]
-    pub(crate) last_commit: bool,
+    #[command(flatten)]
+    pub(crate) file_selection: FileSelectionArgs,
 
     /// When hooks fail, run `git diff` directly afterward.
-    #[arg(long)]
+    #[arg(long, help_heading = "Run options")]
     pub(crate) show_diff_on_failure: bool,
 
     /// Stop running hooks after the first failure.
-    #[arg(long)]
+    #[arg(long, help_heading = "Run options")]
     pub(crate) fail_fast: bool,
 
     /// Do not stop running hooks after the first failure.
@@ -560,8 +679,21 @@ pub(crate) struct RunOptions {
     pub(crate) no_fail_fast: bool,
 
     /// Do not run the hooks, but print the hooks that would have been run.
-    #[arg(long)]
+    #[arg(long, help_heading = "Run options")]
     pub(crate) dry_run: bool,
+
+    /// Hide hook reports with the specified final status.
+    ///
+    /// Can be specified multiple times or as a comma-separated list. This does
+    /// not change hook execution or exit codes.
+    #[arg(
+        long,
+        value_name = "STATUS",
+        value_enum,
+        value_delimiter = ',',
+        help_heading = "Run options"
+    )]
+    pub(crate) hide_status: Vec<run::HideStatus>,
 
     #[command(flatten)]
     pub(crate) extra: RunExtraArgs,
@@ -579,22 +711,51 @@ pub(crate) struct RunArgs {
     /// When not specified and no group filter is active, this command starts with
     /// hooks eligible for `pre-commit`. If no hook is selected and the command
     /// named hook IDs, those same IDs are matched again against hooks configured
-    /// for `manual`. With `--group` or `--no-group`, omitting the stage lets
-    /// hooks from any configured stage match, using the default file input mode;
-    /// hooks that only run at `commit-msg` or `prepare-commit-msg` are ignored.
-    #[arg(long, value_enum, alias = "hook-stage")]
+    /// for `manual`. With `--group`, `--require-group`, or `--no-group`, omitting
+    /// the stage lets hooks from any configured stage match, using the default file
+    /// input mode; hooks that only run at `commit-msg` or `prepare-commit-msg` are
+    /// ignored.
+    #[arg(
+        long,
+        value_enum,
+        alias = "hook-stage",
+        help_heading = "Hook selection"
+    )]
     pub(crate) stage: Option<Stage>,
 
     /// Run hooks belonging to the specified group.
     ///
-    /// Can be specified multiple times.
-    #[arg(long = "group", value_name = "GROUP")]
+    /// Can be specified multiple times; a hook may match any specified group.
+    /// When combined with `--require-group`, both filters must match.
+    /// `@ungrouped` matches hooks without groups.
+    #[arg(long = "group", value_name = "GROUP", help_heading = "Hook selection")]
     pub(crate) groups: Vec<String>,
+
+    /// Run hooks belonging to every specified group.
+    ///
+    /// Can be specified multiple times; a hook must match every specified group.
+    /// When combined with `--group`, it must also match at least one `--group`.
+    /// `--no-group` excludes matching hooks regardless of argument order.
+    ///
+    /// For example, `--require-group fast --group format --group lint-only`
+    /// selects hooks in `fast` and either `format` or `lint-only`.
+    /// The special selector `@ungrouped` is also supported.
+    #[arg(
+        long = "require-group",
+        value_name = "GROUP",
+        help_heading = "Hook selection"
+    )]
+    pub(crate) required_groups: Vec<String>,
 
     /// Do not run hooks belonging to the specified group.
     ///
     /// Can be specified multiple times. Exclusion wins over inclusion.
-    #[arg(long = "no-group", value_name = "GROUP")]
+    /// The special selector `@ungrouped` is also supported.
+    #[arg(
+        long = "no-group",
+        value_name = "GROUP",
+        help_heading = "Hook selection"
+    )]
     pub(crate) no_groups: Vec<String>,
 }
 
@@ -617,7 +778,12 @@ pub(crate) struct TryRepoArgs {
     /// When not specified, this command starts with hooks eligible for
     /// `pre-commit`. If no hook is selected and the command named hook IDs,
     /// those same IDs are matched again against hooks configured for `manual`.
-    #[arg(long, value_enum, alias = "hook-stage")]
+    #[arg(
+        long,
+        value_enum,
+        alias = "hook-stage",
+        help_heading = "Hook selection"
+    )]
     pub(crate) stage: Option<Stage>,
 }
 
@@ -680,13 +846,21 @@ pub(crate) struct ListArgs {
 
     /// Show hooks belonging to the specified group.
     ///
-    /// Can be specified multiple times.
+    /// Can be specified multiple times. `@ungrouped` matches hooks without groups.
     #[arg(long = "group", value_name = "GROUP")]
     pub(crate) groups: Vec<String>,
+
+    /// Show hooks belonging to every specified group.
+    ///
+    /// Can be specified multiple times. Composes with `--group` and `--no-group`.
+    /// The special selector `@ungrouped` is also supported.
+    #[arg(long = "require-group", value_name = "GROUP")]
+    pub(crate) required_groups: Vec<String>,
 
     /// Do not show hooks belonging to the specified group.
     ///
     /// Can be specified multiple times. Exclusion wins over inclusion.
+    /// The special selector `@ungrouped` is also supported.
     #[arg(long = "no-group", value_name = "GROUP")]
     pub(crate) no_groups: Vec<String>,
 
@@ -770,6 +944,7 @@ impl From<Option<Option<PathBuf>>> for SampleConfigTarget {
 
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Revision selection")]
 pub(crate) struct UpdateArgs {
     /// Update to the bleeding edge of the default branch instead of the latest tagged version.
     #[arg(long)]
@@ -779,10 +954,15 @@ pub(crate) struct UpdateArgs {
     #[arg(long)]
     pub(crate) freeze: bool,
     /// Only update this repository. This option may be specified multiple times.
-    #[arg(long, value_name = "REPO", conflicts_with = "exclude_repo")]
+    #[arg(
+        long,
+        value_name = "REPO",
+        conflicts_with = "exclude_repo",
+        help_heading = "Repository selection"
+    )]
     pub(crate) repo: Vec<String>,
     /// Do not update this repository. This option may be specified multiple times.
-    #[arg(long, value_name = "REPO")]
+    #[arg(long, value_name = "REPO", help_heading = "Repository selection")]
     pub(crate) exclude_repo: Vec<String>,
     /// Only consider tags matching this glob pattern. This option may be specified multiple times.
     /// Defaults to `update.include_tags` in the project or global config when unset.
@@ -826,16 +1006,16 @@ pub(crate) struct UpdateArgs {
     )]
     pub(crate) repo_exclude_tag: Vec<RepoTagPattern>,
     /// Do not write changes to the config file, only display what would be changed.
-    #[arg(long)]
+    #[arg(long, help_heading = "Update options")]
     pub(crate) dry_run: bool,
     /// Exit with status 1 if updates are available.
-    #[arg(long)]
+    #[arg(long, help_heading = "Update options")]
     pub(crate) exit_code: bool,
     /// Alias of `--dry-run --exit-code`.
-    #[arg(long)]
+    #[arg(long, help_heading = "Update options")]
     pub(crate) check: bool,
     /// Number of threads to use.
-    #[arg(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0, help_heading = "Update options")]
     pub(crate) jobs: usize,
     /// Minimum release age (in days) required for a version to be eligible.
     ///
@@ -970,10 +1150,30 @@ pub(crate) enum CacheCommand {
     Size(SizeArgs),
 }
 
+#[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum CacheSizeOutputFormat {
+    /// Display a human-readable size in terminals and raw bytes otherwise.
+    #[default]
+    Auto,
+    /// Display the cache size in a human-readable format.
+    Human,
+    /// Display the cache size in raw bytes.
+    Machine,
+}
+
 #[derive(Args, Debug)]
 pub struct SizeArgs {
-    /// Display the cache size in human-readable format (e.g., `1.2 GiB` instead of raw bytes).
-    #[arg(long = "human", short = 'H', alias = "human-readable")]
+    /// Select the output format.
+    #[arg(long, value_enum, default_value_t = CacheSizeOutputFormat::default())]
+    pub(crate) output_format: CacheSizeOutputFormat,
+
+    /// Display the cache size in human-readable format (e.g., `1.2GiB` instead of raw bytes).
+    #[arg(
+        long = "human",
+        short = 'H',
+        alias = "human-readable",
+        conflicts_with = "output_format"
+    )]
     pub(crate) human: bool,
 }
 
@@ -1105,6 +1305,17 @@ mod _gen {
         let mut parents = Vec::new();
 
         output.push_str("# CLI Reference\n\n");
+        output.push_str(concat!(
+            "Running `prek` without a subcommand is equivalent to running `prek run`.\n\n",
+            "## Exit status\n\n",
+            "| Code | Meaning |\n",
+            "| -- | -- |\n",
+            "| `0` | The command succeeded. |\n",
+            "| `1` | A hook, validation, or other expected user-level check failed. |\n",
+            "| `2` | Command-line input, configuration, or an operational error prevented the command from completing. |\n",
+            "| `130` | The command was interrupted. |\n\n",
+            "`prek exec` propagates the exit code of the external command it runs.\n\n",
+        ));
         generate_command(&mut output, &cmd, &mut parents);
 
         let mut output = output.replace("\r\n", "\n");

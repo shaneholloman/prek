@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Value};
 
 use crate::cli::run::Selectors;
-use crate::cli::{ExitStatus, RunOptions, flag};
+use crate::cli::{ExitStatus, RunArgs, RunOptions};
 use crate::config::{self, Stage};
 use crate::git;
 use crate::git::GIT_ROOT;
@@ -51,7 +51,7 @@ async fn clone_and_commit(repo_path: &Path, head_rev: &str, tmp_dir: &Path) -> R
     let index_path = shadow.join(".git/index");
     let objects_path = shadow.join(".git/objects");
 
-    let staged_files = git::get_staged_files(repo_path).await?;
+    let staged_files = git::staged_files(repo_path).await?;
     if !staged_files.is_empty() {
         git::git_cmd()?
             .arg("add")
@@ -147,7 +147,7 @@ async fn prepare_repo<'a>(
 
     // If repo is a local repo with uncommitted changes, create a shadow repo to commit the changes.
     if is_local && git::has_diff("HEAD", repo_path).await? {
-        warn_user!("Creating temporary repo with uncommitted changes...");
+        warn_user!("Local repository has uncommitted changes. Creating a temporary copy...");
         let shadow = clone_and_commit(repo_path, &head_rev, tmp_dir).await?;
         let head_rev = get_head_rev(&shadow).await?;
         Ok(PreparedRepo {
@@ -218,7 +218,7 @@ pub(crate) async fn try_repo(
     let store = Store::from_settings()?;
     let tmp_dir = TempDir::with_prefix_in("try-repo-", store.scratch_path())?;
 
-    let store = Store::from_path(tmp_dir.path()).init()?;
+    let store = Store::from_path(tmp_dir.path())?.init()?;
     let selectors = Selectors::load(&run_args.includes, &run_args.skips, GIT_ROOT.as_ref()?)?;
 
     let predefined_hooks = match repo.as_str() {
@@ -273,25 +273,20 @@ pub(crate) async fn try_repo(
     )?;
     writeln!(printer.stdout(), "{}", display_config_str.dimmed())?;
 
+    let mut run_args = run_args;
+    // The generated config already contains only the hooks selected above.
+    run_args.includes.clear();
+    run_args.skips.clear();
+
     crate::cli::run(
         &store,
         Some(config_file),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        stage,
-        run_args.from_ref,
-        run_args.to_ref,
-        run_args.all_files,
-        run_args.files,
-        run_args.directory,
-        run_args.last_commit,
-        run_args.show_diff_on_failure,
-        flag(run_args.fail_fast, run_args.no_fail_fast),
-        run_args.dry_run,
+        RunArgs {
+            options: run_args,
+            stage,
+            ..RunArgs::default()
+        },
         refresh,
-        run_args.extra,
         verbose,
         printer,
     )

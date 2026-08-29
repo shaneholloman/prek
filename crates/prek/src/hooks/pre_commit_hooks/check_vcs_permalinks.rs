@@ -1,14 +1,16 @@
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::path::Path;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
 use memchr::memmem;
 use regex::bytes::{Match, Regex};
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::hook::Hook;
+use crate::hooks::HookOutput;
+use crate::hooks::pre_commit_hooks::{hook_filenames, parse_hook_args};
 use crate::hooks::run_concurrent_file_checks;
 use crate::run::INTERNAL_CONCURRENCY;
 
@@ -16,9 +18,12 @@ use crate::run::INTERNAL_CONCURRENCY;
 #[command(disable_help_subcommand = true)]
 #[command(disable_version_flag = true)]
 #[command(disable_help_flag = true)]
-struct Args {
-    #[arg(long = "additional-github-domain")]
+pub(crate) struct Args {
+    /// Additional GitHub-style domain to check (repeatable).
+    #[arg(long = "additional-github-domain", value_name = "DOMAIN")]
     additional_github_domains: Vec<String>,
+    #[arg(value_name = "FILENAMES")]
+    filenames: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -78,16 +83,16 @@ fn is_probable_commit_hash(reference: &[u8]) -> bool {
     (4..=64).contains(&reference.len()) && reference.iter().all(u8::is_ascii_hexdigit)
 }
 
-pub(crate) async fn check_vcs_permalinks(
-    hook: &Hook,
-    filenames: &[&Path],
-) -> Result<(i32, Vec<u8>)> {
-    let args = Args::try_parse_from(hook.entry.expect_direct().split_with_args(&hook.args)?)?;
-    let matcher = GithubNonPermalinkMatcher::new(args.additional_github_domains);
+/// Runs the `check-vcs-permalinks` hook.
+pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
+    let args: Args = parse_hook_args(hook)?;
+    let matcher = Arc::new(GithubNonPermalinkMatcher::new(
+        args.additional_github_domains,
+    ));
 
     let file_base = hook.project().relative_path();
     run_concurrent_file_checks(
-        filenames.iter().copied(),
+        hook_filenames(&args.filenames, filenames),
         *INTERNAL_CONCURRENCY,
         |filename| check_file(file_base, filename, &matcher),
     )
@@ -97,10 +102,22 @@ pub(crate) async fn check_vcs_permalinks(
 async fn check_file(
     file_base: &Path,
     filename: &Path,
+    matcher: &Arc<GithubNonPermalinkMatcher>,
+) -> Result<HookOutput> {
+    let path = file_base.join(filename);
+    let filename = filename.to_path_buf();
+    let matcher = Arc::clone(matcher);
+    let (exit_status, output) =
+        tokio::task::spawn_blocking(move || check_file_sync(&path, &filename, &matcher)).await??;
+    Ok(HookOutput::unchanged(exit_status, output))
+}
+
+fn check_file_sync(
+    path: &Path,
+    filename: &Path,
     matcher: &GithubNonPermalinkMatcher,
 ) -> Result<(i32, Vec<u8>)> {
-    let path = file_base.join(filename);
-    let file = fs_err::tokio::File::open(&path).await?;
+    let file = fs_err::File::open(path)?;
     let mut reader = BufReader::new(file);
 
     let mut retval = 0;
@@ -108,7 +125,7 @@ async fn check_file(
     let mut line = Vec::new();
     let mut line_number = 0;
 
-    while reader.read_until(b'\n', &mut line).await? != 0 {
+    while reader.read_until(b'\n', &mut line)? != 0 {
         line_number += 1;
         for m in matcher.find_non_permalink(&line) {
             retval = 1;
@@ -226,13 +243,13 @@ mod tests {
         )
         .await?;
 
-        let matcher = matcher(&["github.example.com"]);
+        let matcher = Arc::new(matcher(&["github.example.com"]));
         let relative = PathBuf::from("links.md");
-        let (code, output) = check_file(dir.path(), &relative, &matcher).await?;
+        let result = check_file(dir.path(), &relative, &matcher).await?;
 
-        assert_eq!(code, 1);
+        assert_eq!(result.exit_status, 1);
         assert_eq!(
-            String::from_utf8(output)?,
+            String::from_utf8(result.output)?,
             "Non-permanent github link detected: links.md:1:https://github.example.com/owner/repo/blob/main/file.py#L10\nNon-permanent github link detected: links.md:1:https://github.com/owner/repo/blob/master/src/lib.rs#L5\n",
         );
 

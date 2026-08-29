@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::env::consts::EXE_EXTENSION;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -24,11 +23,11 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::hook_entry::PreparedHookEntry;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 #[derive(Debug, Copy, Clone)]
@@ -95,6 +94,7 @@ impl LanguageBackend for Dart {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -112,6 +112,7 @@ impl LanguageBackend for Dart {
                 &info.env_path,
                 source_path,
                 &hook.additional_dependencies,
+                install_cwd,
             )
             .await?;
         } else if !hook.additional_dependencies.is_empty() {
@@ -151,66 +152,44 @@ impl LanguageBackend for Dart {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Dart must have env path");
-        let bin_path = bin_path(env_dir);
-        let new_path = prepend_paths(&[&bin_path]).context("Failed to join PATH")?;
-        let packages_path = package_config_path(env_dir);
+        let new_path = prepend_paths(&[&bin_path(env_dir)]).context("Failed to join PATH")?;
 
-        let mut entry = hook.entry.resolve(Some(&new_path), store)?;
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::PUB_CACHE, env_dir);
+        Ok(environment)
+    }
+
+    fn prepare_hook_entry(
+        &self,
+        _store: &Store,
+        hook: &InstalledHook,
+        environment: &ExecutionEnvironment,
+    ) -> Result<PreparedHookEntry> {
+        let env_dir = hook.env_path().expect("Dart must have env path");
+        let packages_path = package_config_path(env_dir);
+        let repo_path = hook.repo_path().unwrap_or(hook.work_dir());
+        let argv_entry = hook.entry.expect_argv_entry();
+        let mut entry = argv_entry.resolve(repo_path, environment.path(hook), hook.work_dir())?;
         // `dart pub get` writes the hook env's dependency graph here. Dart's
         // VM-level `--packages` flag makes `Platform.packageConfig` and package
         // imports resolve against this env instead of the hook work dir.
         if packages_path.exists()
-            && let Some(index) = packages_arg_insert_position(entry.argv(), &hook.args)
+            && let Some(index) = packages_arg_insert_position(&entry, &hook.args)
         {
             entry.argv_mut().insert(
                 index,
                 format!("--packages={}", packages_path.display()).into(),
             );
         }
-
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::PUB_CACHE, env_dir)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        Ok(entry)
     }
 }
 
@@ -274,6 +253,7 @@ fn packages_arg_insert_position(entry: &[OsString], hook_args: &[String]) -> Opt
 /// Compile declared package executables into the hook env's `bin` directory.
 async fn compile_executables(
     dart: &Path,
+    install_cwd: &Path,
     source_path: &Path,
     bin_dir: &Path,
     packages_path: &Path,
@@ -306,6 +286,7 @@ async fn compile_executables(
         );
 
         Cmd::new(dart)
+            .current_dir(install_cwd)
             .arg("compile")
             .arg("exe")
             .arg(format!("--packages={}", packages_path.display()))
@@ -375,6 +356,7 @@ async fn install_package_config(
         .env(EnvVars::PUB_CACHE, env_path)
         .arg("pub")
         .arg("get")
+        .sanitize_git_repo_env()
         .check(true)
         .output()
         .await?;
@@ -388,6 +370,7 @@ async fn install_from_pubspec(
     env_path: &Path,
     source_path: &Path,
     dependencies: &[String],
+    install_cwd: &Path,
 ) -> Result<()> {
     let pubspec_path = source_path.join(PUBSPEC_YAML);
     let pubspec_content = fs_err::read_to_string(&pubspec_path)?;
@@ -405,6 +388,7 @@ async fn install_from_pubspec(
 
     compile_executables(
         dart,
+        install_cwd,
         source_path,
         &bin_path(env_path),
         &package_config_path(env_path),

@@ -1,5 +1,269 @@
 # Changelog
 
+## 0.5.0
+
+Released on 2026-08-27.
+
+### Highlights
+
+#### Choose where hook toolchains come from
+
+`language_version` now accepts a source `preference` alongside the version
+`request`, letting you control where prek looks for a compatible toolchain when
+it creates a hook environment. Use `managed` (the default) or `system` to choose
+which source prek tries first while still allowing fallback and downloads. Use
+`only-managed` or `only-system` to require one source.
+
+For example, this local Ruff hook requires a Python 3.12 toolchain managed by
+prek:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        language: python
+        entry: ruff check
+        additional_dependencies: [ruff]
+        language_version:
+          request: "3.12"
+          preference: only-managed
+```
+
+With `only-managed`, prek reuses a compatible toolchain from its managed store
+or downloads one when needed. It never falls back to Python from `PATH`, an OS
+package manager, or a version manager, so toolchain selection does not depend on
+the developer or CI machine's external environment.
+
+Existing scalar values such as `language_version: "3.12"` continue to work. See
+[toolchain management and `language_version`](https://prek.j178.dev/0.5.0/languages/#toolchain-management-and-language_version)
+for the full source-selection behavior. ([#2613](https://github.com/j178/prek/pull/2613))
+
+### Breaking changes
+
+The breaking changes in this release are mostly small cleanups, and most users should not be affected.
+
+- Group names can no longer start with `@`. This prefix is now reserved for special group selectors such as the new `@ungrouped` selector. ([#2617](https://github.com/j178/prek/pull/2617))
+- `PREK_MAX_CONCURRENCY` has been removed. Use `PREK_CONCURRENT_HOOKS` and `PREK_CONCURRENT_BATCHES` to control hook and per-hook batch concurrency separately. ([#2620](https://github.com/j178/prek/pull/2620))
+- The top-level `prek init-template-dir` command has been removed. Use `prek util init-template-dir`, or `prek init-templatedir` for drop-in compatibility with `pre-commit`. ([#2623](https://github.com/j178/prek/pull/2623))
+- `prek auto-update` has been removed. Use `prek update`, or `prek autoupdate` for drop-in compatibility with `pre-commit`. ([#2619](https://github.com/j178/prek/pull/2619))
+
+### Enhancements
+
+- Add configurable toolchain source preferences ([#2613](https://github.com/j178/prek/pull/2613))
+- Allow explicit `language: python` to opt out of fast-path hooks ([#2608](https://github.com/j178/prek/pull/2608))
+- Group `run` and `update` options in CLI help ([#2629](https://github.com/j178/prek/pull/2629))
+- Preserve terminal theme contrast for status labels ([#2592](https://github.com/j178/prek/pull/2592))
+- Add `@ungrouped` group selector ([#2617](https://github.com/j178/prek/pull/2617))
+- Retry uv installation with static musl binary ([#2600](https://github.com/j178/prek/pull/2600))
+- Support `{hook_repo}` placeholder in hook `entry` ([#2602](https://github.com/j178/prek/pull/2602))
+
+### Bug fixes
+
+- Expose the git work tree to hooks running outside the git root ([#2579](https://github.com/j178/prek/pull/2579))
+- Isolate local hook environment installation ([#2615](https://github.com/j178/prek/pull/2615))
+- Preserve hook config deserialization error locations ([#2573](https://github.com/j178/prek/pull/2573))
+- Resolve hook log files from their config directory ([#2580](https://github.com/j178/prek/pull/2580))
+- Track explicit config paths as absolute paths ([#2574](https://github.com/j178/prek/pull/2574))
+
+### Documentation
+
+- Document prek run architecture ([#2630](https://github.com/j178/prek/pull/2630))
+- Publish versioned documentation ([#2626](https://github.com/j178/prek/pull/2626))
+
+### Contributors
+
+- @jeromeheissler
+- @gurgeous
+- @j178
+
+## 0.4.14
+
+Released on 2026-08-17.
+
+### Enhancements
+
+- Support check-yaml unsafe mode ([#2546](https://github.com/j178/prek/pull/2546))
+
+### Performance
+
+- Reuse allocations in common filters ([#2548](https://github.com/j178/prek/pull/2548))
+
+### Bug fixes
+
+- Accept non-finite floats in check-yaml ([#2545](https://github.com/j178/prek/pull/2545))
+- Allow comment-heavy YAML in check-yaml ([#2554](https://github.com/j178/prek/pull/2554))
+- Sanitize captured terminal output before replay ([#2552](https://github.com/j178/prek/pull/2552))
+
+### Contributors
+
+- @j178
+
+## 0.4.13
+
+Released on 2026-08-10.
+
+### Highlights
+
+#### Manage hook tools with mise
+
+The new `language: mise` support lets hooks install tools using
+[`mise`](https://mise.jdx.dev/) in an isolated environment:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint
+        language: mise
+        additional_dependencies: ["aqua:golangci/golangci-lint@2"]
+        entry: golangci-lint run --fast-only ./...
+        pass_filenames: false
+```
+
+#### Run commands in hook environments
+
+The new `prek exec` subcommand can run an explicit command in a configured
+hook's prepared environment. For example, the hook above makes its managed
+binary available to this command:
+
+```console
+$ prek exec golangci-lint -- golangci-lint --version
+```
+
+### Enhancements
+
+- Add `mise` language support ([#2540](https://github.com/j178/prek/pull/2540))
+- Add `deny-filename-pattern` and `require-filename-pattern` hooks ([#2488](https://github.com/j178/prek/pull/2488))
+- Add `prek exec` for running commands in a hook environment ([#2478](https://github.com/j178/prek/pull/2478))
+- Add `yaml-language-server:` comment to YAML sample config ([#2486](https://github.com/j178/prek/pull/2486))
+- Make `prek cache size` output terminal-aware ([#2508](https://github.com/j178/prek/pull/2508))
+- Match file regexes against path bytes ([#2541](https://github.com/j178/prek/pull/2541))
+- Show hook aliases in run output ([#2497](https://github.com/j178/prek/pull/2497))
+- Show hook descriptions in run output ([#2490](https://github.com/j178/prek/pull/2490))
+
+### Performance
+
+- Avoid env cache scans for skipped hooks ([#2502](https://github.com/j178/prek/pull/2502))
+- Cache Node version queries ([#2500](https://github.com/j178/prek/pull/2500))
+
+### Bug fixes
+
+- Fix Node hook installation with npm 11 ([#2487](https://github.com/j178/prek/pull/2487))
+- Isolate dependency installs from inherited Git repository state ([#2506](https://github.com/j178/prek/pull/2506))
+
+### Documentation
+
+- Document combined group filtering ([#2495](https://github.com/j178/prek/pull/2495))
+- Explain what prek does in README ([#2507](https://github.com/j178/prek/pull/2507))
+- Refresh "Why prek" highlights ([#2474](https://github.com/j178/prek/pull/2474))
+
+### Contributors
+
+- @will-wright-eng
+- @Repiteo
+- @j178
+
+## 0.4.12
+
+Released on 2026-08-03.
+
+### Enhancements
+
+- Add `--require-group` for hook group intersections ([#2472](https://github.com/j178/prek/pull/2472))
+- Align fast-path and builtin pre-commit hooks ([#2433](https://github.com/j178/prek/pull/2433))
+- Do not shuffle file list for verbose output ([#2431](https://github.com/j178/prek/pull/2431))
+- Improve top-level command descriptions ([#2429](https://github.com/j178/prek/pull/2429))
+- Install `uv` from Astral CDN and drop source racing ([#2455](https://github.com/j178/prek/pull/2455))
+- Make `prek install --force` bypass external hooks paths ([#2437](https://github.com/j178/prek/pull/2437))
+- Show builtin hook flags in verbose list output ([#2427](https://github.com/j178/prek/pull/2427))
+- Verify uv release archive checksums ([#2456](https://github.com/j178/prek/pull/2456))
+
+### Performance
+
+- Precompute file tags in parallel ([#2440](https://github.com/j178/prek/pull/2440))
+- Skip diffs after known hook modifications ([#2447](https://github.com/j178/prek/pull/2447))
+- Skip worktree diffs for read-only languages ([#2432](https://github.com/j178/prek/pull/2432))
+- Track builtin hook file changes directly ([#2404](https://github.com/j178/prek/pull/2404))
+
+### Bug fixes
+
+- Use full object IDs in diff snapshots ([#2448](https://github.com/j178/prek/pull/2448))
+
+### Documentation
+
+- Add a multi-repository configuration example ([#2434](https://github.com/j178/prek/pull/2434))
+- Rewrite benchmark documentation ([#2469](https://github.com/j178/prek/pull/2469))
+
+### Contributors
+
+- @j178
+- @BitWeaverDev
+- @allanlewis
+
+## 0.4.11
+
+Released on 2026-07-25.
+
+### Highlights
+
+- This release adds two new builtin hooks, `deny-pattern` and `require-pattern`,
+  as native alternatives for `pygrep` use cases. `deny-pattern` fails when a
+  configured pattern is found, while `require-pattern` ensures every selected
+  file contains a match. By matching natively without spawning a Python
+  subprocess, they run over 4x faster than `pygrep` in benchmarks. Note that
+  they use
+  [Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax), which does
+  not support look-around features such as negative lookbehind.
+
+- `prek run` now supports `--glob <PATTERN>` to run hooks on tracked files
+  matching a glob. It can be repeated or combined with `--files` and
+  `--directory`.
+
+- Hook priorities now support reusable aliases:
+
+    ```toml
+    [priorities]
+    checks = 10
+
+    [[repos]]
+    repo = "builtin"
+    hooks = [
+      { id = "check-json", priority = "checks" },
+      { id = "check-yaml", priority = "checks" },
+    ]
+    ```
+
+    This makes parallel scheduling easier to read and maintain.
+
+### Enhancements
+
+- Add `deny-pattern` and `require-pattern` builtin hooks ([#2359](https://github.com/j178/prek/pull/2359))
+- Support `--glob` patterns in `prek run` ([#2381](https://github.com/j178/prek/pull/2381))
+- Support reusable aliases for hook priorities ([#2331](https://github.com/j178/prek/pull/2331))
+- Implement `requirements-txt-fixer` as a builtin hook ([#2390](https://github.com/j178/prek/pull/2390))
+- Improve user-facing warnings and errors ([#2380](https://github.com/j178/prek/pull/2380))
+- Install Node hooks through git url ([#2394](https://github.com/j178/prek/pull/2394))
+
+### Performance
+
+- Reduce blocking-pool overhead in file hooks ([#2384](https://github.com/j178/prek/pull/2384))
+- Speed up mixed-line-ending scans with memchr2 ([#2391](https://github.com/j178/prek/pull/2391))
+
+### Bug fixes
+
+- Honor filenames in builtin hook entry and args ([#2389](https://github.com/j178/prek/pull/2389))
+- Match identify tags across filename parts ([#2399](https://github.com/j178/prek/pull/2399))
+- Preserve hook output order with a shared pipe ([#2385](https://github.com/j178/prek/pull/2385))
+- Preserve system download policy when applying metadata ([#2395](https://github.com/j178/prek/pull/2395))
+
+### Contributors
+
+- @j178
+- @chrisoro
+
 ## 0.4.10
 
 Released on 2026-07-16.

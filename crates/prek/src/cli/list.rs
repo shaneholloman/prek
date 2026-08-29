@@ -31,6 +31,7 @@ pub(crate) async fn list(
     includes: Vec<String>,
     skips: Vec<String>,
     groups: Vec<String>,
+    required_groups: Vec<String>,
     no_groups: Vec<String>,
     hook_stage: Option<Stage>,
     language: Option<Language>,
@@ -41,12 +42,12 @@ pub(crate) async fn list(
 ) -> anyhow::Result<ExitStatus> {
     let workspace_root = Workspace::find_root(config.as_deref(), &CWD)?;
     let selectors = Selectors::load(&includes, &skips, &workspace_root)?;
-    let group_filters = GroupFilters::parse(&groups, &no_groups)?;
+    let group_filters = GroupFilters::parse(&groups, &required_groups, &no_groups)?;
     let workspace = Workspace::discover(store, workspace_root, config, Some(&selectors), refresh)?;
 
     let reporter = HookInitReporter::new(printer);
     let lock = store.lock_async().await?;
-    let hooks = workspace
+    let mut hooks = workspace
         .init_hooks(
             store,
             HookInitFilters::new(Some(&selectors), Some(&group_filters)),
@@ -57,13 +58,12 @@ pub(crate) async fn list(
 
     drop(lock);
 
-    let filtered_hooks: Vec<_> = hooks
-        .into_iter()
-        .filter(|h| selectors.matches_hook(h))
-        .filter(|h| group_filters.matches_hook(h))
-        .filter(|h| hook_stage.is_none_or(|hook_stage| h.stages.contains(hook_stage)))
-        .filter(|h| language.is_none_or(|lang| h.language == lang))
-        .collect();
+    hooks.retain(|h| {
+        selectors.matches_hook(h)
+            && group_filters.matches_hook(h)
+            && hook_stage.is_none_or(|hook_stage| h.stages.contains(hook_stage))
+            && language.is_none_or(|lang| h.language == lang)
+    });
 
     selectors.report_unused();
     group_filters.report_unused();
@@ -72,7 +72,7 @@ pub(crate) async fn list(
         ListOutputFormat::Text => {
             if verbose {
                 // TODO: show repo path and environment path (if installed)
-                for hook in &filtered_hooks {
+                for hook in &hooks {
                     writeln!(printer.stdout(), "{}", hook.full_id().bold())?;
 
                     writeln!(printer.stdout(), "  {} {}", "ID:".bold().cyan(), hook.id)?;
@@ -113,13 +113,13 @@ pub(crate) async fn list(
                     writeln!(printer.stdout())?;
                 }
             } else {
-                for hook in &filtered_hooks {
+                for hook in &hooks {
                     writeln!(printer.stdout(), "{}", hook.full_id())?;
                 }
             }
         }
         ListOutputFormat::Json => {
-            let serializable_hooks: Vec<_> = filtered_hooks
+            let serializable_hooks: Vec<_> = hooks
                 .into_iter()
                 .map(|h| {
                     let id = h.id.clone();

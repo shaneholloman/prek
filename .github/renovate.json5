@@ -18,18 +18,20 @@
     'internal'
   ],
   semanticCommits: 'disabled',
-  // pre-commit is currently in beta testing, must opt in
-  'pre-commit': {
-    enabled: true
-  },
   cargo: {
     // See https://docs.renovatebot.com/configuration-options/#rangestrategy
     rangeStrategy: "update-lockfile",
     managerFilePatterns: ["/^Cargo\\.toml$/", "/^crates/.*Cargo\\.toml$/"],
   },
+  // Pin GitHub Actions references in documentation to immutable SHAs.
+  'github-actions': {
+    managerFilePatterns: [
+      '/README\\.md$/',
+      '/^docs/.*\\.md$/',
+    ],
+  },
   enabledManagers: [
     'github-actions',
-    'pre-commit',
     'cargo',
     'custom.regex',
     'dockerfile',
@@ -49,19 +51,6 @@
         'const\\s+CUR_UV_VERSION\\s*:\\s*&str\\s*=\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
         'UV_VERSION:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
       ]
-    },
-    // Update major GitHub actions references in documentation.
-    {
-      customType: 'regex',
-      managerFilePatterns: [
-        '/README\\.md$/',
-        '/^docs/.*\\.md$/'
-      ],
-      matchStrings: [
-        '\\suses: (?<depName>[\\w-]+/[\\w-]+)(?<path>/.*)?@(?<currentValue>.+?)\\s',
-      ],
-      datasourceTemplate: 'github-tags',
-      versioningTemplate: 'regex:^v(?<major>\\d+)$',
     },
     // Minimum supported Rust toolchain version
     {
@@ -102,19 +91,6 @@
       matchDepNames: ['rui314/setup-mold'],
       overrideDatasource: 'github-tags',
     },
-    {
-      groupName: 'pre-commit',
-      matchManagers: ['pre-commit'],
-      matchFileNames: ['.pre-commit-config.yaml']
-    },
-    // Annotate GitHub Actions SHAs with a SemVer version.
-    {
-      extends: [
-        'helpers:pinGitHubActionDigests'
-      ],
-      extractVersion: '^(?<version>v?\\d+\\.\\d+\\.\\d+)$',
-      versioning: 'regex:^v?(?<major>\\d+)(\\.(?<minor>\\d+)\\.(?<patch>\\d+))?$'
-    },
     // Disable updates for GitHub runners: we'd only pin them to a specific version
     // if there was a deliberate reason to do so
     {
@@ -134,7 +110,7 @@
       commitMessageTopic: "Rust",
     },
     {
-      matchManagers: [ 'cargo', 'pre-commit', 'github-actions', 'pep621', 'custom.regex', 'dockerfile' ],
+      matchManagers: [ 'cargo', 'github-actions', 'pep621', 'custom.regex', 'dockerfile' ],
       minimumReleaseAge: '7 days'
     },
     {

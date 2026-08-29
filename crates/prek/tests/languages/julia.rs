@@ -1,11 +1,8 @@
-use crate::common::{TestContext, cmd_snapshot};
+use crate::common::{TestEnv, cmd_snapshot};
 
 #[test]
 fn local_hook() {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -18,9 +15,9 @@ fn local_hook() {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -34,7 +31,7 @@ fn local_hook() {
     ");
 
     // Run again to check `health_check` works correctly.
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -50,10 +47,7 @@ fn local_hook() {
 
 #[test]
 fn additional_dependencies() {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -67,9 +61,9 @@ fn additional_dependencies() {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -84,21 +78,16 @@ fn additional_dependencies() {
 }
 
 #[test]
-fn project_toml() -> anyhow::Result<()> {
-    use assert_fs::fixture::{FileWriteStr, PathChild};
-
-    let context = TestContext::new();
-    context.init_project();
-
-    context
-        .work_dir()
-        .child("Project.toml")
-        .write_str(indoc::indoc! {r#"
+fn project_toml() {
+    let context = TestEnv::new_git().with_file(
+        "Project.toml",
+        indoc::indoc! {r#"
             [deps]
             Example = "7876af07-990d-54b4-ab0e-23690620f79a"
-        "#})?;
+        "#},
+    );
 
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = context.with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -111,9 +100,9 @@ fn project_toml() -> anyhow::Result<()> {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -125,23 +114,14 @@ fn project_toml() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }
 
 #[test]
-fn script_file() -> anyhow::Result<()> {
-    use assert_fs::fixture::{FileWriteStr, PathChild};
+fn script_file() {
+    let context =
+        TestEnv::new_git().with_file("my_script.jl", r#"println("Hello from script file!")"#);
 
-    let context = TestContext::new();
-    context.init_project();
-
-    context
-        .work_dir()
-        .child("my_script.jl")
-        .write_str(r#"println("Hello from script file!")"#)?;
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = context.with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -154,9 +134,9 @@ fn script_file() -> anyhow::Result<()> {
                 pass_filenames: false
     "});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -168,19 +148,13 @@ fn script_file() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }
 
 #[test]
 fn remote_hook() {
-    let context = TestContext::new();
-
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
-          - repo: https://github.com/prek-test-repos/julia-hooks
+          - repo: https://github.com/prek-ci/julia-hooks
             rev: v1.0.0
             hooks:
               - id: hello
@@ -188,11 +162,9 @@ fn remote_hook() {
                 verbose: true
     "});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters = context.filters();
-
-    cmd_snapshot!(filters, context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----

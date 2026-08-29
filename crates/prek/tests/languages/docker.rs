@@ -1,16 +1,11 @@
-use assert_fs::fixture::{FileWriteStr, PathChild};
-
-use crate::common::{TestContext, cmd_snapshot};
+use crate::common::{TestEnv, cmd_snapshot};
 
 /// GitHub Action only has docker for linux hosted runners.
 #[test]
 fn docker() {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
-          - repo: https://github.com/prek-test-repos/docker-hooks
+          - repo: https://github.com/prek-ci/docker-hooks
             rev: v1.0
             hooks:
               - id: hello-world
@@ -21,9 +16,9 @@ fn docker() {
                 always_run: true
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r#"
+    cmd_snapshot!(context, context.run(), @r#"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -38,14 +33,14 @@ fn docker() {
 }
 
 #[test]
-fn workspace_docker() -> anyhow::Result<()> {
-    let context = TestContext::new();
-    let cwd = context.work_dir();
-    context.init_project();
+fn workspace_docker() {
+    let context = TestEnv::new_git()
+        .with_file("project1/project1.txt", "")
+        .with_file("project2/project2.txt", "");
 
     let config = indoc::indoc! {r"
         repos:
-          - repo: https://github.com/prek-test-repos/docker-hooks
+          - repo: https://github.com/prek-ci/docker-hooks
             rev: v1.0
             hooks:
               - id: hello-world
@@ -53,13 +48,11 @@ fn workspace_docker() -> anyhow::Result<()> {
                 verbose: true
     "};
 
-    context.setup_workspace(&["project1", "project2"], config)?;
-    cwd.child("project1").child("project1.txt").write_str("")?;
-    cwd.child("project2").child("project2.txt").write_str("")?;
+    context.setup_workspace(&["project1", "project2"], config);
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r#"
+    cmd_snapshot!(context, context.run(), @r#"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -85,6 +78,4 @@ fn workspace_docker() -> anyhow::Result<()> {
 
     ----- stderr -----
     "#);
-
-    Ok(())
 }

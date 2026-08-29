@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::config::validate_name;
+use crate::config::validate_group_name;
 use crate::hook::Hook;
 use crate::warn_user;
 
@@ -192,7 +192,31 @@ pub(crate) struct Selectors {
     usage: Arc<Mutex<FilterUsage>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HookSelection {
+    Selected,
+    Skipped,
+    NotSelected,
+}
+
 impl Selectors {
+    /// Create selectors for one explicit include without applying skip environment variables.
+    pub(crate) fn from_include(include: &str, workspace_root: &Path) -> Result<Self, Error> {
+        let include = parse_single_selector(
+            include,
+            workspace_root,
+            SelectorSource::CliArg,
+            RealFileSystem,
+        )?;
+        trace!("Include selector: `{include}`");
+
+        Ok(Self {
+            includes: vec![include],
+            skips: Vec::new(),
+            usage: Arc::default(),
+        })
+    }
+
     /// Load include and skip selectors from CLI args and environment variables.
     pub(crate) fn load(
         includes: &[String],
@@ -266,8 +290,8 @@ impl Selectors {
             })
     }
 
-    /// Check if a hook matches any of the selection criteria.
-    pub(crate) fn matches_hook(&self, hook: &Hook) -> bool {
+    /// Select a hook and retain whether an explicit skip caused its exclusion.
+    pub(super) fn select_hook(&self, hook: &Hook) -> HookSelection {
         let mut usage = self.usage.lock().unwrap();
 
         // Always check every selector to track usage
@@ -278,22 +302,31 @@ impl Selectors {
                 skipped = true;
             }
         }
-        if skipped {
-            return false;
-        }
-
-        if self.includes.is_empty() {
-            return true; // No `includes` mean all hooks are included
-        }
-
-        let mut included = false;
-        for (idx, include) in self.includes.iter().enumerate() {
-            if include.matches_hook(hook) {
-                usage.use_include(idx);
-                included = true;
+        let included = if self.includes.is_empty() {
+            true
+        } else {
+            let mut included = false;
+            for (idx, include) in self.includes.iter().enumerate() {
+                if include.matches_hook(hook) {
+                    usage.use_include(idx);
+                    included = true;
+                }
             }
+            included
+        };
+
+        if !included {
+            HookSelection::NotSelected
+        } else if skipped {
+            HookSelection::Skipped
+        } else {
+            HookSelection::Selected
         }
-        included
+    }
+
+    /// Check if a hook matches any of the selection criteria.
+    pub(crate) fn matches_hook(&self, hook: &Hook) -> bool {
+        self.select_hook(hook) == HookSelection::Selected
     }
 
     /// Return whether skip selectors rule out a hook from config alone.
@@ -407,107 +440,136 @@ impl Selectors {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GroupFilters {
-    includes: Vec<String>,
-    excludes: Vec<String>,
+    include_any: Vec<GroupSelector>,
+    require_all: Vec<GroupSelector>,
+    exclude_any: Vec<GroupSelector>,
     usage: Arc<Mutex<FilterUsage>>,
 }
 
+#[derive(Debug, Clone)]
+enum GroupSelector {
+    Named(String),
+    Ungrouped,
+}
+
+const UNGROUPED_GROUP: &str = "@ungrouped";
+
+impl GroupSelector {
+    fn parse(group: &str) -> Result<Self, &'static str> {
+        if group == UNGROUPED_GROUP {
+            Ok(Self::Ungrouped)
+        } else {
+            validate_group_name(group)?;
+            Ok(Self::Named(group.to_owned()))
+        }
+    }
+}
+
+impl Display for GroupSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Named(group) => f.write_str(group),
+            Self::Ungrouped => f.write_str(UNGROUPED_GROUP),
+        }
+    }
+}
+
 impl GroupFilters {
-    pub(crate) fn parse(includes: &[String], excludes: &[String]) -> Result<Self, Error> {
+    pub(crate) fn parse(
+        include_any: &[String],
+        require_all: &[String],
+        exclude_any: &[String],
+    ) -> Result<Self, Error> {
         let parse_groups = |flag: &'static str, groups: &[String]| {
             let mut seen = FxHashSet::default();
-            let mut names = Vec::new();
+            let mut selectors = Vec::new();
 
             for group in groups {
-                if let Err(reason) = validate_name(group) {
-                    return Err(Error::GroupSelector {
+                let selector =
+                    GroupSelector::parse(group).map_err(|reason| Error::GroupSelector {
                         selector: format!("{flag}={group}"),
                         source: anyhow!("group name {reason}"),
-                    });
-                }
+                    })?;
                 if seen.insert(group.as_str()) {
-                    names.push(group.clone());
+                    selectors.push(selector);
                 }
             }
 
-            Ok(names)
+            Ok(selectors)
         };
 
         Ok(Self {
-            includes: parse_groups("--group", includes)?,
-            excludes: parse_groups("--no-group", excludes)?,
+            include_any: parse_groups("--group", include_any)?,
+            require_all: parse_groups("--require-group", require_all)?,
+            exclude_any: parse_groups("--no-group", exclude_any)?,
             usage: Arc::default(),
         })
     }
 
     pub(crate) fn has_filters(&self) -> bool {
-        !self.includes.is_empty() || !self.excludes.is_empty()
+        !self.include_any.is_empty() || !self.require_all.is_empty() || !self.exclude_any.is_empty()
+    }
+
+    fn matches_groups(&self, contains_group: impl Fn(&GroupSelector) -> bool) -> bool {
+        let mut usage = self.usage.lock().unwrap();
+
+        let mut matches_any_excluded = false;
+        for (idx, exclude) in self.exclude_any.iter().enumerate() {
+            if contains_group(exclude) {
+                usage.use_exclude(idx);
+                matches_any_excluded = true;
+            }
+        }
+
+        let mut matches_any_included = self.include_any.is_empty();
+        for (idx, include) in self.include_any.iter().enumerate() {
+            if contains_group(include) {
+                usage.use_include(idx);
+                matches_any_included = true;
+            }
+        }
+
+        let mut matches_all_required = true;
+        for (idx, requirement) in self.require_all.iter().enumerate() {
+            if contains_group(requirement) {
+                usage.use_requirement(idx);
+            } else {
+                matches_all_required = false;
+            }
+        }
+
+        matches_any_included && matches_all_required && !matches_any_excluded
     }
 
     pub(crate) fn matches_hook(&self, hook: &Hook) -> bool {
-        let mut usage = self.usage.lock().unwrap();
-
-        let mut excluded = false;
-        for (idx, exclude) in self.excludes.iter().enumerate() {
-            if hook.groups.contains(exclude) {
-                usage.use_exclude(idx);
-                excluded = true;
-            }
-        }
-
-        if self.includes.is_empty() {
-            return !excluded;
-        }
-
-        let mut included = false;
-        for (idx, include) in self.includes.iter().enumerate() {
-            if hook.groups.contains(include) {
-                usage.use_include(idx);
-                included = true;
-            }
-        }
-
-        included && !excluded
+        self.matches_groups(|group| match group {
+            GroupSelector::Named(group) => hook.groups.contains(group),
+            GroupSelector::Ungrouped => hook.groups.is_empty(),
+        })
     }
 
     pub(crate) fn matches_configured_hook(&self, hook: &ConfiguredHook<'_>) -> bool {
-        let mut usage = self.usage.lock().unwrap();
-        let contains_group = |group: &str| {
-            hook.groups
-                .is_some_and(|groups| groups.iter().any(|hook_group| hook_group == group))
-        };
-
-        let mut excluded = false;
-        for (idx, exclude) in self.excludes.iter().enumerate() {
-            if contains_group(exclude) {
-                usage.use_exclude(idx);
-                excluded = true;
-            }
-        }
-
-        if self.includes.is_empty() {
-            return !excluded;
-        }
-
-        let mut included = false;
-        for (idx, include) in self.includes.iter().enumerate() {
-            if contains_group(include) {
-                usage.use_include(idx);
-                included = true;
-            }
-        }
-
-        included && !excluded
+        self.matches_groups(|group| match group {
+            GroupSelector::Named(group) => hook
+                .groups
+                .is_some_and(|groups| groups.iter().any(|hook_group| hook_group == group)),
+            GroupSelector::Ungrouped => hook.groups.is_none_or(<[String]>::is_empty),
+        })
     }
 
     pub(crate) fn report_unused(&self) {
         let usage = self.usage.lock().unwrap();
         let unused = usage
-            .unused_includes(&self.includes)
+            .unused_includes(&self.include_any)
             .map(|(_, group)| format!("--group={group}"))
             .chain(
                 usage
-                    .unused_excludes(&self.excludes)
+                    .unused_requirements(&self.require_all)
+                    .map(|(_, group)| format!("--require-group={group}")),
+            )
+            .chain(
+                usage
+                    .unused_excludes(&self.exclude_any)
                     .map(|(_, group)| format!("--no-group={group}")),
             )
             .collect::<Vec<_>>();
@@ -533,17 +595,22 @@ impl GroupFilters {
 
 #[derive(Default, Debug)]
 struct FilterUsage {
-    used_includes: FxHashSet<usize>,
-    used_excludes: FxHashSet<usize>,
+    includes: FxHashSet<usize>,
+    requirements: FxHashSet<usize>,
+    excludes: FxHashSet<usize>,
 }
 
 impl FilterUsage {
     fn use_include(&mut self, idx: usize) {
-        self.used_includes.insert(idx);
+        self.includes.insert(idx);
+    }
+
+    fn use_requirement(&mut self, idx: usize) {
+        self.requirements.insert(idx);
     }
 
     fn use_exclude(&mut self, idx: usize) {
-        self.used_excludes.insert(idx);
+        self.excludes.insert(idx);
     }
 
     fn unused_includes<'a, T>(
@@ -553,7 +620,7 @@ impl FilterUsage {
         values
             .iter()
             .enumerate()
-            .filter(|(idx, _)| !self.used_includes.contains(idx))
+            .filter(|(idx, _)| !self.includes.contains(idx))
     }
 
     fn unused_excludes<'a, T>(
@@ -563,7 +630,17 @@ impl FilterUsage {
         values
             .iter()
             .enumerate()
-            .filter(|(idx, _)| !self.used_excludes.contains(idx))
+            .filter(|(idx, _)| !self.excludes.contains(idx))
+    }
+
+    fn unused_requirements<'a, T>(
+        &'a self,
+        values: &'a [T],
+    ) -> impl Iterator<Item = (usize, &'a T)> + 'a {
+        values
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.requirements.contains(idx))
     }
 
     fn report_unused(&self, selectors: &Selectors) {
@@ -775,6 +852,8 @@ fn parse_comma_separated(input: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use tempfile::TempDir;
 
@@ -816,14 +895,14 @@ mod tests {
 
         // Test explicit hook ID with colon prefix
         let selector = parse_single_selector(":black", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "black"));
+        assert_matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "black");
 
         let selector = parse_single_selector(":lint:ruff", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "lint:ruff"));
+        assert_matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "lint:ruff");
 
         // Test bare hook ID (backward compatibility)
         let selector = parse_single_selector("black", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "black"));
+        assert_matches!(selector.expr, SelectorExpr::HookId(ref id) if id == "black");
 
         Ok(())
     }
@@ -834,18 +913,21 @@ mod tests {
 
         // Test project path with slash
         let selector = parse_single_selector("src/", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(
-            matches!(selector.expr, SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from("src"))
+        assert_matches!(
+            selector.expr,
+            SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from("src")
         );
 
         // Test current directory
         let selector = parse_single_selector(".", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(
-            matches!(selector.expr, SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from(""))
+        assert_matches!(
+            selector.expr,
+            SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from("")
         );
         let selector = parse_single_selector("./", fs.root(), SelectorSource::CliArg, &fs)?;
-        assert!(
-            matches!(selector.expr, SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from(""))
+        assert_matches!(
+            selector.expr,
+            SelectorExpr::ProjectPrefix(ref path) if path == &PathBuf::from("")
         );
 
         Ok(())

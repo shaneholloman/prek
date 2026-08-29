@@ -1,7 +1,6 @@
 use std::env::consts::EXE_EXTENSION;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::str;
 use std::sync::Arc;
 
@@ -10,11 +9,10 @@ use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::hook_entry::PreparedHookEntry;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 #[derive(Debug, Copy, Clone)]
@@ -26,6 +24,7 @@ impl LanguageBackend for R {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -81,7 +80,7 @@ impl LanguageBackend for R {
                 &rscript,
                 &additional_dependency_install_code(&info.env_path),
                 &hook.additional_dependencies,
-                hook.work_dir(),
+                install_cwd,
             )
             .await
             .context("Failed to install R additional dependencies")?;
@@ -121,56 +120,28 @@ impl LanguageBackend for R {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
         _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_path = hook.env_path().expect("R must have env path");
         let activate = env_path.join("activate.R");
-        let entry = r_hook_entry(hook)?;
 
-        let run = async |batch: &[&Path]| {
-            let mut cmd = Cmd::new(&entry[0]);
-            cmd.current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env_remove(EnvVars::RENV_PROJECT)
-                .env(EnvVars::R_PROFILE_USER, &activate)
-                .stdin(Stdio::null());
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .env_remove(EnvVars::RENV_PROJECT)
+            .env(EnvVars::R_PROFILE_USER, &activate);
+        Ok(environment)
+    }
 
-            cmd.envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false);
-
-            let mut output = cmd
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, &entry, run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+    fn prepare_hook_entry(
+        &self,
+        _store: &Store,
+        hook: &InstalledHook,
+        _environment: &ExecutionEnvironment,
+    ) -> Result<PreparedHookEntry> {
+        Ok(PreparedHookEntry::argv(r_hook_entry(hook)?))
     }
 }
 
@@ -266,7 +237,7 @@ fn additional_dependency_install_code(env_path: &Path) -> String {
 }
 
 fn r_hook_entry(hook: &InstalledHook) -> Result<Vec<OsString>> {
-    let entry = hook.entry.expect_direct().split()?;
+    let entry = hook.entry.expect_argv_entry().split()?;
     validate_r_entry(&entry)?;
 
     let mut cmd = Vec::with_capacity(entry.len() + 4);

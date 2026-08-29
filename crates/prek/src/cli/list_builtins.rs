@@ -24,35 +24,43 @@ pub(crate) fn list_builtins(
 ) -> anyhow::Result<ExitStatus> {
     let hooks = BuiltinHooks::iter().map(|variant| {
         let id = variant.as_ref();
-        BuiltinHook::from_id(id).expect("All BuiltinHooks variants should be valid")
+        let hook = BuiltinHook::from_id(id).expect("All BuiltinHooks variants should be valid");
+        (variant, hook)
     });
 
+    let mut stdout = printer.stdout_important();
     match output_format {
         ListOutputFormat::Text => {
             if verbose {
-                for hook in hooks {
-                    writeln!(printer.stdout_important(), "{}", hook.id.bold())?;
+                for (variant, hook) in hooks {
+                    writeln!(stdout, "{}", hook.id.bold())?;
                     if let Some(description) = &hook.options.description {
-                        writeln!(printer.stdout_important(), "  {description}")?;
+                        writeln!(stdout, "  {description}")?;
                     }
-                    writeln!(printer.stdout_important())?;
+                    if let Some(flags_help) = variant.flags_help() {
+                        writeln!(stdout, "  flags:")?;
+                        for line in flags_help.lines() {
+                            writeln!(stdout, "  {line}")?;
+                        }
+                    }
+                    writeln!(stdout)?;
                 }
             } else {
-                for hook in hooks {
-                    writeln!(printer.stdout_important(), "{}", hook.id)?;
+                for (_, hook) in hooks {
+                    writeln!(stdout, "{}", hook.id)?;
                 }
             }
         }
         ListOutputFormat::Json => {
             let serializable: Vec<_> = hooks
-                .map(|h| SerializableBuiltinHook {
+                .map(|(_, h)| SerializableBuiltinHook {
                     id: h.id,
                     name: h.name,
                     description: h.options.description,
                 })
                 .collect();
             let json_output = serde_json::to_string_pretty(&serializable)?;
-            writeln!(printer.stdout_important(), "{json_output}")?;
+            writeln!(stdout, "{json_output}")?;
         }
     }
 

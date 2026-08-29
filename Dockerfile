@@ -1,8 +1,8 @@
 FROM --platform=$BUILDPLATFORM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv
 
-FROM --platform=$BUILDPLATFORM ubuntu:24.04@sha256:d1e2e92c075e5ca139d51a140fff46f84315c0fdce203eab2807c7e495eff4f9 AS build
+FROM --platform=$BUILDPLATFORM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03 AS build
 
-ARG UBUNTU_SNAPSHOT=20260301T000000Z
+ARG UBUNTU_SNAPSHOT=20260801T000000Z
 ARG RUSTUP_VERSION=1.28.2
 
 ENV HOME="/root"
@@ -55,8 +55,8 @@ COPY crates crates
 RUN case "${TARGETPLATFORM}" in \
   "linux/arm64") export JEMALLOC_SYS_WITH_LG_PAGE=16;; \
   esac && \
-  cargo zigbuild --bin prek --profile dist --target $(cat rust_target.txt)
-RUN cp target/$(cat rust_target.txt)/dist/prek /prek
+  cargo zigbuild --bin prek --release --target $(cat rust_target.txt)
+RUN cp target/$(cat rust_target.txt)/release/prek /prek
 # TODO: Optimize binary size, with a version that also works when cross compiling
 # RUN strip --strip-all /prek
 

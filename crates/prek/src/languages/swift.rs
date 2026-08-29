@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,11 +8,10 @@ use semver::Version;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 #[derive(Debug, Copy, Clone)]
@@ -90,6 +88,7 @@ impl LanguageBackend for Swift {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -109,6 +108,7 @@ impl LanguageBackend for Swift {
                 debug!(%hook, "Building Swift package");
                 let build_path = build_dir(&info.env_path);
                 Cmd::new("swift")
+                    .current_dir(install_cwd)
                     .arg("build")
                     .arg("-c")
                     .arg("release")
@@ -116,6 +116,7 @@ impl LanguageBackend for Swift {
                     .arg(repo_path)
                     .arg("--build-path")
                     .arg(&build_path)
+                    .sanitize_git_repo_env()
                     .check(true)
                     .output()
                     .await
@@ -123,6 +124,7 @@ impl LanguageBackend for Swift {
 
                 // Get the actual bin path (includes target triple, e.g., .build/arm64-apple-macosx/release)
                 let bin_path_output = Cmd::new("swift")
+                    .current_dir(install_cwd)
                     .arg("build")
                     .arg("-c")
                     .arg("release")
@@ -131,6 +133,7 @@ impl LanguageBackend for Swift {
                     .arg("--build-path")
                     .arg(&build_path)
                     .arg("--show-bin-path")
+                    .sanitize_git_repo_env()
                     .check(true)
                     .output()
                     .await
@@ -170,16 +173,11 @@ impl LanguageBackend for Swift {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
-        // Get bin path from install info if a package was built
+    ) -> Result<ExecutionEnvironment> {
         let new_path =
             if let Some(bin_path) = hook.install_info().and_then(|i| i.get_extra(BIN_PATH_KEY)) {
                 prepend_paths(&[Path::new(bin_path)]).context("Failed to join PATH")?
@@ -187,41 +185,9 @@ impl LanguageBackend for Swift {
                 EnvVars.var_os(EnvVars::PATH).unwrap_or_default()
             };
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment.set_path(&new_path);
+        Ok(environment)
     }
 }
 

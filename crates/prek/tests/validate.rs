@@ -1,16 +1,15 @@
-use assert_fs::fixture::{FileWriteStr, PathChild};
 use prek_consts::PRE_COMMIT_CONFIG_YAML;
 
-use crate::common::{TestContext, cmd_snapshot};
+use crate::common::{TestEnv, cmd_snapshot};
 
 mod common;
 
 #[test]
-fn validate_config() -> anyhow::Result<()> {
-    let context = TestContext::new();
+fn validate_config() {
+    let context = TestEnv::new();
 
     // No files to validate.
-    cmd_snapshot!(context.filters(), context.validate_config(), @r"
+    cmd_snapshot!(context, context.validate_config(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -19,7 +18,7 @@ fn validate_config() -> anyhow::Result<()> {
     warning: No configs to check
     ");
 
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = context.with_config(indoc::indoc! {r"
         repos:
           - repo: https://github.com/pre-commit/pre-commit-hooks
             rev: v5.0.0
@@ -29,7 +28,7 @@ fn validate_config() -> anyhow::Result<()> {
               - id: check-json
     "});
     // Validate one file.
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -38,16 +37,16 @@ fn validate_config() -> anyhow::Result<()> {
     success: All configs are valid
     ");
 
-    context
-        .work_dir()
-        .child("config-1.yaml")
-        .write_str(indoc::indoc! {r"
+    context.write_file(
+        "config-1.yaml",
+        indoc::indoc! {r"
             repos:
               - repo: https://github.com/pre-commit/pre-commit-hooks
-        "})?;
+        "},
+    );
 
     // Validate multiple files.
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML).arg("config-1.yaml"), @"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML).arg("config-1.yaml"), @"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -61,14 +60,35 @@ fn validate_config() -> anyhow::Result<()> {
     2 |   - repo: https://github.com/pre-commit/pre-commit-hooks
       |     ^ missing field `rev`
     ");
+}
 
-    Ok(())
+#[test]
+fn mutable_revision_warning_has_actionable_guidance() {
+    let context = TestEnv::new().with_config(indoc::indoc! {r"
+        repos:
+          - repo: https://example.com/hooks
+            rev: main
+            hooks: []
+    "});
+
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: The following repositories use mutable `rev` values (branches or moving tags):
+    https://example.com/hooks: main
+    `prek` does not automatically detect changes to these references after the first install.
+    Use a tag or commit SHA for each `rev`, or run `prek update` to select the latest eligible tag.
+    See https://prek.j178.dev/reference/configuration/#rev for details.
+    success: All configs are valid
+    ");
 }
 
 #[test]
 fn invalid_config_error() {
-    let context = TestContext::new();
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new().with_config(indoc::indoc! {r"
         repos:
           - repo: https://github.com/pre-commit/pre-commit-hooks
             hooks:
@@ -78,7 +98,7 @@ fn invalid_config_error() {
             rev: 1.0
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -87,7 +107,7 @@ fn invalid_config_error() {
     success: All configs are valid
     ");
 
-    context.write_pre_commit_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: https://github.com/pre-commit/pre-commit-hooks
             rev: v6.0.0
@@ -99,7 +119,7 @@ fn invalid_config_error() {
               - name: check-json
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -118,8 +138,7 @@ fn invalid_config_error() {
 
 #[test]
 fn unknown_priority_alias_is_invalid() {
-    let context = TestContext::new();
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new().with_config(indoc::indoc! {r"
         priorities:
           checks: 10
         repos:
@@ -132,7 +151,7 @@ fn unknown_priority_alias_is_invalid() {
                 priority: formatting
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -144,14 +163,13 @@ fn unknown_priority_alias_is_invalid() {
 
 #[test]
 fn priority_aliases_cannot_contain_whitespace() {
-    let context = TestContext::new();
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new().with_config(indoc::indoc! {r#"
         priorities:
           "static checks": 10
         repos: []
     "#});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r#"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r#"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -171,8 +189,7 @@ fn priority_aliases_cannot_contain_whitespace() {
 
 #[test]
 fn duplicate_and_unused_priority_aliases_are_valid() {
-    let context = TestContext::new();
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new().with_config(indoc::indoc! {r"
         priorities:
           checks: 10
           verification: 10
@@ -192,7 +209,7 @@ fn duplicate_and_unused_priority_aliases_are_valid() {
                 priority: verification
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -203,11 +220,11 @@ fn duplicate_and_unused_priority_aliases_are_valid() {
 }
 
 #[test]
-fn validate_manifest() -> anyhow::Result<()> {
-    let context = TestContext::new();
+fn validate_manifest() {
+    let context = TestEnv::new();
 
     // No files to validate.
-    cmd_snapshot!(context.filters(), context.validate_manifest(), @r"
+    cmd_snapshot!(context, context.validate_manifest(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -216,10 +233,9 @@ fn validate_manifest() -> anyhow::Result<()> {
     warning: No manifests to check
     ");
 
-    context
-        .work_dir()
-        .child(".pre-commit-hooks.yaml")
-        .write_str(indoc::indoc! {r"
+    context.write_file(
+        ".pre-commit-hooks.yaml",
+        indoc::indoc! {r"
             -   id: check-added-large-files
                 name: check for added large files
                 description: prevents giant files from being committed.
@@ -227,9 +243,10 @@ fn validate_manifest() -> anyhow::Result<()> {
                 language: python
                 stages: [pre-commit, pre-push, manual]
                 minimum_pre_commit_version: 3.2.0
-        "})?;
+        "},
+    );
     // Validate one file.
-    cmd_snapshot!(context.filters(), context.validate_manifest().arg(".pre-commit-hooks.yaml"), @r"
+    cmd_snapshot!(context, context.validate_manifest().arg(".pre-commit-hooks.yaml"), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -238,57 +255,58 @@ fn validate_manifest() -> anyhow::Result<()> {
     success: All manifests are valid
     ");
 
-    context
-        .work_dir()
-        .child("hooks-1.yaml")
-        .write_str(indoc::indoc! {r"
+    context.write_file(
+        "hooks-1.yaml",
+        indoc::indoc! {r"
             -   id: check-added-large-files
                 name: check for added large files
                 description: prevents giant files from being committed.
                 language: python
                 stages: [pre-commit, pre-push, manual]
                 minimum_pre_commit_version: 3.2.0
-        "})?;
+        "},
+    );
 
     // Validate multiple files.
-    cmd_snapshot!(context.filters(), context.validate_manifest().arg(".pre-commit-hooks.yaml").arg("hooks-1.yaml"), @"
+    cmd_snapshot!(context, context.validate_manifest().arg(".pre-commit-hooks.yaml").arg("hooks-1.yaml"), @"
     success: false
     exit_code: 1
     ----- stdout -----
 
     ----- stderr -----
     error: Failed to parse `hooks-1.yaml`
-      caused by: error: line 6 column 5: missing field `entry`
-     --> <input>:6:5
+      caused by: error: line 1 column 5: missing field `entry`
+     --> <input>:1:5
       |
-    4 |     language: python
-    5 |     stages: [pre-commit, pre-push, manual]
-    6 |     minimum_pre_commit_version: 3.2.0
+    1 | -   id: check-added-large-files
       |     ^ missing field `entry`
+    2 |     name: check for added large files
+    3 |     description: prevents giant files from being committed.
+      |
     ");
-
-    Ok(())
 }
 
 #[test]
 fn unexpected_keys_warning() {
-    let context = TestContext::new();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new().with_config(indoc::indoc! {r"
+        x-anchor: &anchor
+          language: system
         repos:
           - repo: local
             unexpected_repo_key: some_value
+            x-repo-key: some_value
             hooks:
               - id: test-hook
                 name: Test Hook
                 entry: echo test
-                language: system
+                <<: *anchor
+                x-hook-key: some_value
         unexpected_top_level_key: some_value
         another_unknown: test
         minimum_pre_commit_version: 1.0.0
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -298,7 +316,7 @@ fn unexpected_keys_warning() {
     success: All configs are valid
     ");
 
-    context.write_pre_commit_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             unexpected_repo_key: some_value
@@ -316,7 +334,7 @@ fn unexpected_keys_warning() {
         minimum_pre_commit_version: 1.0.0
     "});
 
-    cmd_snapshot!(context.filters(), context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -330,6 +348,29 @@ fn unexpected_keys_warning() {
       - `repos[0].hooks[0].unexpected_hook_key_2`
       - `repos[0].hooks[0].unexpected_hook_key_3`
       - `repos[0].hooks[0].unexpected_hook_key_4`
+    success: All configs are valid
+    ");
+
+    context.write_config(indoc::indoc! {r"
+        x-anchor: &anchor
+          language: system
+        repos:
+          - repo: local
+            x-repo-key: test
+            hooks:
+              - id: test-hook
+                name: Test Hook
+                entry: echo test
+                <<: *anchor
+                x-hook-key: test
+    "});
+
+    cmd_snapshot!(context, context.validate_config().arg(PRE_COMMIT_CONFIG_YAML), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
     success: All configs are valid
     ");
 }

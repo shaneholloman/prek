@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,11 +8,9 @@ use semver::Version;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 #[derive(Debug, Copy, Clone)]
@@ -56,6 +53,7 @@ impl LanguageBackend for Lua {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -70,13 +68,13 @@ impl LanguageBackend for Lua {
         // Install dependencies for the remote repository.
         if let Some(repo_path) = hook.repo_path() {
             if let Some(rockspec) = Self::get_rockspec_file(repo_path) {
-                Self::install_rockspec(&info.env_path, repo_path, &rockspec).await?;
+                Self::install_rockspec(&info.env_path, install_cwd, &rockspec).await?;
             }
         }
 
         // Install additional dependencies.
         for dep in &hook.additional_dependencies {
-            Self::install_dependency(&info.env_path, dep).await?;
+            Self::install_dependency(&info.env_path, install_cwd, dep).await?;
         }
 
         info.with_toolchain(lua_info.executable)
@@ -116,70 +114,32 @@ impl LanguageBackend for Lua {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Lua must have env path");
         let new_path = prepend_paths(&[&env_dir.join("bin")]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-
         let version = &hook
             .install_info()
             .expect("Lua must have install info")
             .language_version;
-        // version without patch, e.g. 5.4
         let version = format!("{}.{}", version.major, version.minor);
-        let lua_path = Lua::get_lua_path(env_dir, &version);
-        let lua_cpath = Lua::get_lua_cpath(env_dir, &version);
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::LUA_PATH, &lua_path)
-                .env(EnvVars::LUA_CPATH, &lua_cpath)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::LUA_PATH, Lua::get_lua_path(env_dir, &version))
+            .env(EnvVars::LUA_CPATH, Lua::get_lua_cpath(env_dir, &version));
+        Ok(environment)
     }
 }
 
 impl Lua {
-    async fn install_rockspec(env_path: &Path, root_path: &Path, rockspec: &Path) -> Result<()> {
+    async fn install_rockspec(env_path: &Path, install_cwd: &Path, rockspec: &Path) -> Result<()> {
         Cmd::new("luarocks")
-            .current_dir(root_path)
+            .current_dir(install_cwd)
             .arg("--tree")
             .arg(env_path)
             .arg("make")
@@ -191,8 +151,13 @@ impl Lua {
         Ok(())
     }
 
-    async fn install_dependency(env_path: &Path, dependency: &str) -> Result<()> {
+    async fn install_dependency(
+        env_path: &Path,
+        install_cwd: &Path,
+        dependency: &str,
+    ) -> Result<()> {
         Cmd::new("luarocks")
+            .current_dir(install_cwd)
             .arg("--tree")
             .arg(env_path)
             .arg("install")

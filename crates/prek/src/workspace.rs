@@ -7,7 +7,6 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use ignore::WalkState;
-use itertools::zip_eq;
 use owo_colors::OwoColorize;
 use prek_consts::CONFIG_FILENAMES;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -20,7 +19,7 @@ use crate::config::{self, Config, read_config};
 use crate::fs::Simplified;
 use crate::git::GIT_ROOT;
 use crate::hook::HookSpec;
-use crate::hook::{self, Hook, HookBuilder, Repo};
+use crate::hook::{self, Hook, Repo};
 use crate::store::{CacheBucket, Store};
 use crate::{git, store, warn_user};
 
@@ -41,7 +40,9 @@ pub(crate) enum Error {
     )]
     MissingConfigFile,
 
-    #[error("Hook `{hook}` not present in repo `{repo}`")]
+    #[error(
+        "Hook `{hook}` was not found in repository `{repo}`. Check the hook ID or choose a `rev` that includes it"
+    )]
     HookNotFound { hook: String, repo: String },
 
     #[error(transparent)]
@@ -104,68 +105,48 @@ impl<'a> HookInitFilters<'a> {
     }
 }
 
-/// Plan per-config-entry initialization while collecting each kept remote key once for cloning.
-fn plan_project_repo_init<'a>(
-    project: &'a Project,
-    filters: HookInitFilters<'_>,
-    remote_keys_to_clone: &mut FxHashSet<config::RemoteRepoKey<'a>>,
-    remote_configs: &mut Vec<&'a config::RemoteRepo>,
-) -> Vec<bool> {
-    let mut repo_entries_to_init = Vec::with_capacity(project.config.repos.len());
-
-    for repo in &project.config.repos {
-        match repo {
-            config::Repo::Remote(repo) => {
-                let keep = filters.keeps_remote_repo(project, repo);
-                repo_entries_to_init.push(keep);
-
-                if keep && remote_keys_to_clone.insert(repo.key()) {
-                    remote_configs.push(repo);
-                }
-            }
-            config::Repo::Local(_) | config::Repo::Meta(_) | config::Repo::Builtin(_) => {
-                repo_entries_to_init.push(true);
-            }
-        }
-    }
-
-    repo_entries_to_init
+/// Repository entries to initialize for one project, in configuration order.
+struct ProjectInitPlan<'a> {
+    project: &'a Arc<Project>,
+    repo_configs: Vec<&'a config::Repo>,
 }
 
-fn build_project_repo_slots(
-    project: &Project,
-    repo_entries_to_init: Vec<bool>,
-    remote_repos: &FxHashMap<config::RemoteRepoKey<'_>, Arc<Repo>>,
-) -> ProjectRepoSlots {
-    let mut repos = Vec::with_capacity(project.config.repos.len());
+impl<'a> ProjectInitPlan<'a> {
+    fn new(project: &'a Arc<Project>, filters: HookInitFilters<'_>) -> Self {
+        let mut repo_configs = Vec::with_capacity(project.config.repos.len());
 
-    for (repo, keep) in zip_eq(&project.config.repos, repo_entries_to_init) {
-        match repo {
-            config::Repo::Remote(repo) => {
-                if !keep {
-                    repos.push(None);
+        for repo_config in &project.config.repos {
+            if let config::Repo::Remote(repo) = repo_config {
+                if !filters.keeps_remote_repo(project, repo) {
                     continue;
                 }
-                let key = repo.key();
-                let repo = remote_repos.get(&key).expect("repo not found");
-                repos.push(Some(repo.clone()));
             }
-            config::Repo::Local(repo) => {
-                let repo = Repo::local(repo.hooks.clone());
-                repos.push(Some(Arc::new(repo)));
-            }
-            config::Repo::Meta(repo) => {
-                let repo = Repo::meta(repo.hooks.clone());
-                repos.push(Some(Arc::new(repo)));
-            }
-            config::Repo::Builtin(repo) => {
-                let repo = Repo::builtin(repo.hooks.clone());
-                repos.push(Some(Arc::new(repo)));
+            repo_configs.push(repo_config);
+        }
+
+        Self {
+            project,
+            repo_configs,
+        }
+    }
+}
+
+fn remote_configs_to_clone<'a>(projects: &[ProjectInitPlan<'a>]) -> Vec<&'a config::RemoteRepo> {
+    let mut seen = FxHashSet::default();
+    let mut remote_configs = Vec::new();
+
+    for project in projects {
+        for &repo_config in &project.repo_configs {
+            let config::Repo::Remote(repo) = repo_config else {
+                continue;
+            };
+            if seen.insert(repo.key()) {
+                remote_configs.push(repo);
             }
         }
     }
 
-    ProjectRepoSlots { repos }
+    remote_configs
 }
 
 async fn init_remote_repos<'a>(
@@ -186,23 +167,6 @@ async fn init_remote_repos<'a>(
             Ok((key, repo))
         })
         .collect()
-}
-
-/// Initialized repo slots aligned with the configured repo entries in a project.
-///
-/// A `None` slot means the corresponding remote repo entry was fully excluded by
-/// filters known before cloning, so hook construction should skip that entry.
-struct ProjectRepoSlots {
-    repos: Vec<Option<Arc<Repo>>>,
-}
-
-impl IntoIterator for ProjectRepoSlots {
-    type Item = Option<Arc<Repo>>;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.repos.into_iter()
-    }
 }
 
 pub(crate) struct Project {
@@ -263,6 +227,7 @@ impl Project {
             "Loading project configuration"
         );
 
+        let config_path = std::path::absolute(config_path).map_err(config::Error::from)?;
         let config = read_config(&config_path)?;
 
         let config_dir = config_path
@@ -274,13 +239,13 @@ impl Project {
         Ok(Self {
             root,
             config,
-            config_path: config_path.into_owned(),
+            config_path,
             idx: 0,
             relative_path: PathBuf::new(),
         })
     }
 
-    fn find_config(path: &Path) -> Option<PathBuf> {
+    pub(crate) fn find_config(path: &Path) -> Option<PathBuf> {
         for name in CONFIG_FILENAMES {
             let file = path.join(name);
             if file.is_file() {
@@ -397,74 +362,57 @@ impl Project {
         filters: HookInitFilters<'_>,
         reporter: Option<&dyn HookInitReporter>,
     ) -> Result<Vec<Hook>, Error> {
-        let repos = self.init_repos(store, filters, reporter).await?;
-
         let project = Arc::new(self);
-        let hooks = Project::build_hooks(project, repos).await?;
-
-        Ok(hooks)
-    }
-
-    /// Initialize remote repositories for the project.
-    async fn init_repos(
-        &self,
-        store: &Store,
-        filters: HookInitFilters<'_>,
-        reporter: Option<&dyn HookInitReporter>,
-    ) -> Result<ProjectRepoSlots, Error> {
-        let mut remote_keys_to_clone = FxHashSet::default();
-        let mut remote_configs = Vec::new();
-        let repo_entries_to_init = plan_project_repo_init(
-            self,
-            filters,
-            &mut remote_keys_to_clone,
-            &mut remote_configs,
-        );
-
+        let plan = ProjectInitPlan::new(&project, filters);
+        let remote_configs = remote_configs_to_clone(std::slice::from_ref(&plan));
         let remote_repos = init_remote_repos(store, remote_configs, reporter).await?;
 
-        Ok(build_project_repo_slots(
-            self,
-            repo_entries_to_init,
-            &remote_repos,
-        ))
+        Project::build_hooks(plan, &remote_repos).await
     }
 
     /// Load and prepare hooks for the project.
     async fn build_hooks(
-        project: Arc<Project>,
-        repos: ProjectRepoSlots,
+        plan: ProjectInitPlan<'_>,
+        remote_repos: &FxHashMap<config::RemoteRepoKey<'_>, Arc<Repo>>,
     ) -> Result<Vec<Hook>, Error> {
+        let project = Arc::clone(plan.project);
         let mut hooks = Vec::new();
         let mut push_hook = async |repo: &Arc<Repo>, hook_spec: HookSpec| {
-            let builder = HookBuilder::new(
+            let hook = Hook::from_spec(
                 Arc::clone(&project),
                 Arc::clone(repo),
                 hook_spec,
                 hooks.len(),
-            );
-            let hook = builder.build().await?;
+            )
+            .await?;
             hooks.push(hook);
             Ok::<_, Error>(())
         };
 
-        for (repo_config, repo) in zip_eq(project.config.repos.iter(), repos) {
-            let Some(repo) = repo else {
-                continue;
+        for repo_config in plan.repo_configs {
+            let repo = match repo_config {
+                config::Repo::Remote(repo_config) => {
+                    let repo = remote_repos
+                        .get(&repo_config.key())
+                        .expect("remote repo should have been initialized");
+                    Arc::clone(repo)
+                }
+                config::Repo::Local(_) => Arc::new(Repo::Local),
+                config::Repo::Meta(_) => Arc::new(Repo::Meta),
+                config::Repo::Builtin(_) => Arc::new(Repo::Builtin),
             };
+
             match repo_config {
                 config::Repo::Remote(repo_config) => {
                     for hook_config in &repo_config.hooks {
-                        // Check hook id is valid.
-                        let Some(manifest_hook) = repo.get_hook(&hook_config.id) else {
+                        let Some(manifest_hook) = repo.manifest_hook(&hook_config.id) else {
                             return Err(Error::HookNotFound {
                                 hook: hook_config.id.clone(),
                                 repo: repo.to_string(),
                             });
                         };
 
-                        let mut hook_spec = manifest_hook.clone();
-                        hook_spec.apply_remote_hook_overrides(hook_config);
+                        let hook_spec = HookSpec::from_remote(manifest_hook.clone(), hook_config);
 
                         push_hook(&repo, hook_spec).await?;
                     }
@@ -652,66 +600,6 @@ impl WorkspaceCache {
         fs_err::write(&cache_path, content)?;
         Ok(())
     }
-
-    /// Best-effort source of config paths for bootstrapping config tracking.
-    ///
-    /// This is used on upgrades from older versions that didn't track configs yet.
-    /// It reads all cached workspace discovery entries under `cache/prek/workspace/*`
-    /// and collects any config file paths they mention.
-    pub(crate) fn cached_config_paths(store: &Store) -> FxHashSet<PathBuf> {
-        let mut paths: FxHashSet<PathBuf> = FxHashSet::default();
-
-        let workspace_cache_root = store.cache_path(CacheBucket::Prek).join("workspace");
-        let entries = match fs_err::read_dir(&workspace_cache_root) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return paths,
-            Err(err) => {
-                debug!(path = %workspace_cache_root.display(), %err, "Failed to read workspace cache directory for tracking bootstrap");
-                return paths;
-            }
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    debug!(%err, "Failed to read workspace cache entry for tracking bootstrap");
-                    continue;
-                }
-            };
-
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let content = match fs_err::read_to_string(&path) {
-                Ok(content) => content,
-                Err(err) => {
-                    debug!(path = %path.display(), %err, "Failed to read workspace cache file for tracking bootstrap");
-                    continue;
-                }
-            };
-
-            let cache: WorkspaceCache = match serde_json::from_str(&content) {
-                Ok(cache) => cache,
-                Err(err) => {
-                    debug!(path = %path.display(), %err, "Failed to parse workspace cache file for tracking bootstrap");
-                    continue;
-                }
-            };
-
-            if cache.version != WorkspaceCache::CURRENT_VERSION {
-                continue;
-            }
-
-            for file in cache.config_files {
-                paths.insert(file.path);
-            }
-        }
-
-        paths
-    }
 }
 
 pub(crate) struct Workspace {
@@ -721,6 +609,15 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
+    pub(crate) fn invalidate_cache(store: &Store, root: &Path) -> Result<()> {
+        let cache_path = WorkspaceCache::cache_path(store, root);
+        match fs_err::remove_file(cache_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Find the workspace root.
     /// `dir` must be an absolute path.
     pub(crate) fn find_root(config_file: Option<&Path>, dir: &Path) -> Result<PathBuf, Error> {
@@ -968,42 +865,13 @@ impl Workspace {
         &self.projects
     }
 
-    pub(crate) fn all_projects(&self) -> &[Arc<Project>] {
-        &self.all_projects
+    /// Iterate over configuration files for the selected projects.
+    pub(crate) fn config_files(&self) -> impl Iterator<Item = &Path> {
+        self.projects.iter().map(|project| project.config_file())
     }
 
-    /// Initialize remote repositories for all projects.
-    async fn init_repos(
-        &self,
-        store: &Store,
-        filters: HookInitFilters<'_>,
-        reporter: Option<&dyn HookInitReporter>,
-    ) -> Result<Vec<ProjectRepoSlots>, Error> {
-        let mut remote_keys_to_clone = FxHashSet::default();
-        let mut remote_configs = Vec::new();
-        let project_repo_entries_to_init = self
-            .projects
-            .iter()
-            .map(|project| {
-                plan_project_repo_init(
-                    project,
-                    filters,
-                    &mut remote_keys_to_clone,
-                    &mut remote_configs,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let remote_repos = init_remote_repos(store, remote_configs, reporter).await?;
-
-        Ok(self
-            .projects
-            .iter()
-            .zip(project_repo_entries_to_init)
-            .map(|(project, repo_entries_to_init)| {
-                build_project_repo_slots(project, repo_entries_to_init, &remote_repos)
-            })
-            .collect())
+    pub(crate) fn all_projects(&self) -> &[Arc<Project>] {
+        &self.all_projects
     }
 
     /// Load and prepare hooks for all projects.
@@ -1013,11 +881,17 @@ impl Workspace {
         filters: HookInitFilters<'_>,
         reporter: Option<&dyn HookInitReporter>,
     ) -> Result<Vec<Hook>, Error> {
-        let project_repos = self.init_repos(store, filters, reporter).await?;
+        let plans = self
+            .projects
+            .iter()
+            .map(|project| ProjectInitPlan::new(project, filters))
+            .collect::<Vec<_>>();
+        let remote_configs = remote_configs_to_clone(&plans);
+        let remote_repos = init_remote_repos(store, remote_configs, reporter).await?;
 
         let mut hooks = Vec::new();
-        for (project, repos) in zip_eq(&self.projects, project_repos) {
-            let project_hooks = Project::build_hooks(Arc::clone(project), repos).await?;
+        for plan in plans {
+            let project_hooks = Project::build_hooks(plan, &remote_repos).await?;
             hooks.extend(project_hooks);
         }
 
@@ -1028,11 +902,7 @@ impl Workspace {
 
     /// Check if all configuration files are staged in git.
     pub(crate) async fn check_configs_staged(&self) -> Result<()> {
-        let config_files = self
-            .projects
-            .iter()
-            .map(|project| project.config_file())
-            .collect::<Vec<_>>();
+        let config_files = self.config_files().collect::<Vec<_>>();
         let non_staged = git::files_not_staged(&config_files).await?;
 
         let git_root = GIT_ROOT.as_ref()?;
@@ -1043,14 +913,14 @@ impl Workspace {
                 .collect::<Vec<_>>();
             match non_staged.as_slice() {
                 [filename] => anyhow::bail!(
-                    "prek configuration file is not staged, run `{}` to stage it",
-                    format!("git add {}", filename.user_display()).cyan()
+                    "Configuration file `{}` is not staged. Stage it with `git add` and try again",
+                    filename.user_display().cyan()
                 ),
                 _ => anyhow::bail!(
-                    "The following configuration files are not staged, `git add` them first:\n{}",
+                    "The following configuration files are not staged. Stage them with `git add` and try again:\n{}",
                     non_staged
                         .iter()
-                        .map(|p| format!("  {}", p.user_display()))
+                        .map(|p| format!("  - `{}`", p.user_display()))
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),

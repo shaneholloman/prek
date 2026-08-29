@@ -19,14 +19,15 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::cleanup::cleanup;
 use crate::cli::{
-    CacheCommand, CacheNamespace, Cli, Command, ExitStatus, UtilCommand, UtilNamespace, flag,
+    CacheCommand, CacheNamespace, Cli, Command, ExitStatus, UtilCommand, UtilNamespace,
 };
 #[cfg(feature = "self-update")]
 use crate::cli::{SelfCommand, SelfNamespace, SelfUpdateArgs};
+use crate::fs::CWD;
 use crate::printer::Printer;
-use crate::run::USE_COLOR;
 use crate::settings::FilesystemOptions;
 use crate::store::Store;
+use crate::terminal::USE_COLOR;
 
 mod archive;
 mod checksum;
@@ -52,6 +53,7 @@ mod run;
 mod schema;
 mod settings;
 mod store;
+mod terminal;
 mod version;
 mod warnings;
 mod workspace;
@@ -150,8 +152,7 @@ fn setup_logging(level: Level, log_file: LogFile, store: &Store) -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<ExitStatus> {
-    // Enabled ANSI colors on Windows.
-    let _ = anstyle_query::windows::enable_ansi_colors();
+    terminal::enable_ansi_colors();
 
     ColorChoice::write_global(cli.globals.color.into());
 
@@ -212,36 +213,28 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
 
     debug!("Args: {:?}", std::env::args().collect::<Vec<_>>());
 
-    macro_rules! show_settings {
-        ($arg:expr) => {
-            if cli.globals.show_settings {
-                writeln!(printer.stdout(), "{:#?}", $arg)?;
-                return Ok(ExitStatus::Success);
-            }
-        };
-        ($arg:expr, false) => {
-            if cli.globals.show_settings {
-                writeln!(printer.stdout(), "{:#?}", $arg)?;
-            }
-        };
-    }
-    show_settings!(cli.globals, false);
-
     let command = cli
         .command
         .unwrap_or_else(|| Command::Run(Box::new(cli.run_args)));
     match command {
+        Command::Init(args) => {
+            if cli.globals.config.is_some() {
+                anyhow::bail!(
+                    "`--config` cannot be used with `prek init`; pass the target directory instead"
+                );
+            }
+            cli::init(&store, args.path, args.format, args.no_install, printer).await
+        }
         Command::Install(args) => {
-            show_settings!(args);
-
             cli::install(
                 &store,
+                &CWD,
                 cli.globals.config,
                 args.includes,
                 args.skips,
                 args.hook_types,
                 args.prepare_hooks,
-                args.overwrite,
+                args.force,
                 args.allow_missing_config,
                 cli.globals.refresh,
                 printer,
@@ -261,8 +254,6 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             .await
         }
         Command::Uninstall(args) => {
-            show_settings!(args);
-
             cli::uninstall(
                 cli.globals.config,
                 args.hook_types,
@@ -273,43 +264,35 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             .await
         }
         Command::Run(args) => {
-            show_settings!(args);
-            let args = *args;
-            let options = args.options;
-
             cli::run(
                 &store,
                 cli.globals.config,
-                options.includes,
-                options.skips,
-                args.groups,
-                args.no_groups,
-                args.stage,
-                options.from_ref,
-                options.to_ref,
-                options.all_files,
-                options.files,
-                options.directory,
-                options.last_commit,
-                options.show_diff_on_failure,
-                flag(options.fail_fast, options.no_fail_fast),
-                options.dry_run,
+                *args,
                 cli.globals.refresh,
-                options.extra,
                 cli.globals.verbose > 0,
                 printer,
             )
             .await
         }
+        Command::Exec(args) => {
+            cli::exec(
+                &store,
+                cli.globals.config,
+                args.selector,
+                args.command,
+                cli.globals.refresh,
+                printer,
+            )
+            .await
+        }
         Command::List(args) => {
-            show_settings!(args);
-
             cli::list(
                 &store,
                 cli.globals.config,
                 args.includes,
                 args.skips,
                 args.groups,
+                args.required_groups,
                 args.no_groups,
                 args.hook_stage,
                 args.language,
@@ -321,8 +304,6 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             .await
         }
         Command::HookImpl(args) => {
-            show_settings!(args);
-
             cli::hook_impl(
                 &store,
                 cli.globals.config,
@@ -352,27 +333,24 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             CacheCommand::GC(args) => {
                 cli::cache_gc(&store, args.dry_run, cli.globals.verbose > 0, printer).await
             }
-            CacheCommand::Size(cli::SizeArgs { human }) => cli::cache_size(&store, human, printer),
+            CacheCommand::Size(args) => {
+                let output_format = if args.human {
+                    cli::CacheSizeOutputFormat::Human
+                } else {
+                    args.output_format
+                };
+                cli::cache_size(&store, output_format, printer)
+            }
         },
         Command::Clean => cli::cache_clean(&store, printer),
         Command::GC(args) => {
             cli::cache_gc(&store, args.dry_run, cli.globals.verbose > 0, printer).await
         }
-        Command::ValidateConfig(args) => {
-            show_settings!(args);
-
-            cli::validate_configs(args.configs, printer)
-        }
-        Command::ValidateManifest(args) => {
-            show_settings!(args);
-
-            cli::validate_manifest(args.manifests, printer)
-        }
+        Command::ValidateConfig(args) => cli::validate_configs(args.configs, printer),
+        Command::ValidateManifest(args) => cli::validate_manifest(args.manifests, printer),
         Command::SampleConfig(args) => cli::sample_config(args.file.into(), args.format, printer),
         Command::Update(args) => {
             let filesystem = FilesystemOptions::user()?;
-            show_settings!(args);
-
             cli::update(
                 &store,
                 cli.globals.config,
@@ -395,8 +373,6 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             .await
         }
         Command::TryRepo(args) => {
-            show_settings!(args);
-
             cli::try_repo(
                 cli.globals.config,
                 args.repo,
@@ -410,19 +386,11 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             .await
         }
         Command::Util(UtilNamespace { command }) => match command {
-            UtilCommand::Identify(args) => {
-                show_settings!(args);
-
-                cli::identify(&args.paths, args.output_format, printer)
-            }
+            UtilCommand::Identify(args) => cli::identify(&args.paths, args.output_format, printer),
             UtilCommand::ListBuiltins(args) => {
-                show_settings!(args);
-
                 cli::list_builtins(args.output_format, cli.globals.verbose > 0, printer)
             }
             UtilCommand::InitTemplateDir(args) => {
-                show_settings!(args);
-
                 cli::init_template_dir(
                     &store,
                     args.directory,
@@ -435,13 +403,9 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
                 .await
             }
             UtilCommand::YamlToToml(args) => {
-                show_settings!(args);
-
                 cli::yaml_to_toml(args.input, args.output, args.force, printer)
             }
             UtilCommand::GenerateShellCompletion(args) => {
-                show_settings!(args);
-
                 let mut command = Cli::command();
                 let bin_name = command
                     .get_bin_name()
@@ -480,8 +444,6 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             anyhow::bail!("{msg}");
         }
         Command::InitTemplateDir(args) => {
-            show_settings!(args);
-
             cli::init_template_dir(
                 &store,
                 args.directory,

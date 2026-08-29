@@ -7,19 +7,35 @@ Built-in hooks come into play in two ways:
 1. **Automatic Fast Path**: Automatically replacing execution for known remote repositories.
 2. **Explicit Builtin Repository**: Using `repo: builtin` for offline, zero-setup hooks.
 
+|  | Automatic fast path | `repo: builtin` |
+| -- | -- | -- |
+| Config remains usable by upstream `pre-commit` | Yes | No |
+| Remote repository and manifest | Cloned at the pinned `rev` | Not used |
+| Environment available for fallback | Yes | Not needed |
+| Network needed for first preparation | Yes | No |
+| How to opt out | Set the hook's declared language or `PREK_NO_FAST_PATH=1` | Replace `repo: builtin` with a remote or local hook |
+
+!!! note "Check implementation notes when behavior matters"
+
+    The Rust implementations target the same purpose as their upstream hooks,
+    but a hook can have documented differences in arguments, defaults, or edge
+    cases. Check its entry in the [Hook Reference](#hook-reference). To compare
+    behavior, disable the fast path and run the pinned implementation.
+
 ## 1. Automatic Fast Path
 
 When you use a standard configuration pointing to a supported repository (like `https://github.com/pre-commit/pre-commit-hooks`), `prek` automatically detects this and runs its internal Rust implementation instead of the Python version defined in the repository.
 
 The fast path is activated when the `repo` URL matches `https://github.com/pre-commit/pre-commit-hooks`. No need to change anything in your configuration.
-Note that the `rev` field is ignored for detection purposes.
+The `rev` field does not affect fast-path detection. It still selects the
+manifest that prek reads and the repository implementation used for fallback.
 
 This provides a speed boost while keeping your configuration compatible with the original `pre-commit` tool.
 
 ```yaml
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks  # Enables fast path
-    rev: v4.5.0  # This is ignored for fast path detection
+    rev: v4.5.0  # Used for the manifest and fallback, not fast-path detection
     hooks:
       - id: trailing-whitespace
 ```
@@ -34,36 +50,49 @@ Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hoo
 
 ### <https://github.com/pre-commit/pre-commit-hooks>
 
-- [`trailing-whitespace`](https://github.com/pre-commit/pre-commit-hooks#trailing-whitespace) (Trim trailing whitespace)
-- [`check-added-large-files`](https://github.com/pre-commit/pre-commit-hooks#check-added-large-files) (Prevent committing large files)
-- [`check-case-conflict`](https://github.com/pre-commit/pre-commit-hooks#check-case-conflict) (Check for files that would conflict in case-insensitive filesystems)
-- [`end-of-file-fixer`](https://github.com/pre-commit/pre-commit-hooks#end-of-file-fixer) (Ensure newline at EOF)
-- [`file-contents-sorter`](https://github.com/pre-commit/pre-commit-hooks#file-contents-sorter) (Sort lines in explicitly targeted files)
-- [`fix-byte-order-marker`](https://github.com/pre-commit/pre-commit-hooks#fix-byte-order-marker) (Remove UTF-8 byte order marker)
-- [`forbid-new-submodules`](https://github.com/pre-commit/pre-commit-hooks#forbid-new-submodules) (Prevent addition of new git submodules.)
-- [`check-json`](https://github.com/pre-commit/pre-commit-hooks#check-json) (Validate JSON files)
-- [`check-toml`](https://github.com/pre-commit/pre-commit-hooks#check-toml) (Validate TOML files)
-- [`check-vcs-permalinks`](https://github.com/pre-commit/pre-commit-hooks#check-vcs-permalinks) (Check that VCS links are permalinks)
-- [`check-yaml`](https://github.com/pre-commit/pre-commit-hooks#check-yaml) (Validate YAML files)
-- [`check-xml`](https://github.com/pre-commit/pre-commit-hooks#check-xml) (Validate XML files)
-- [`mixed-line-ending`](https://github.com/pre-commit/pre-commit-hooks#mixed-line-ending) (Normalize or check line endings)
-- [`check-symlinks`](https://github.com/pre-commit/pre-commit-hooks#check-symlinks) (Check for broken symlinks)
-- [`destroyed-symlinks`](https://github.com/pre-commit/pre-commit-hooks#destroyed-symlinks) (Detect destroyed symlinks)
-- [`check-merge-conflict`](https://github.com/pre-commit/pre-commit-hooks#check-merge-conflict) (Check for merge conflicts)
-- [`detect-private-key`](https://github.com/pre-commit/pre-commit-hooks#detect-private-key) (Detect private keys)
-- [`no-commit-to-branch`](https://github.com/pre-commit/pre-commit-hooks#no-commit-to-branch) (Prevent committing to protected branches)
-- [`check-shebang-scripts-are-executable`](https://github.com/pre-commit/pre-commit-hooks#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable)
-- [`check-executables-have-shebangs`](https://github.com/pre-commit/pre-commit-hooks#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang)
+- [`trailing-whitespace`](https://github.com/pre-commit/pre-commit-hooks#trailing-whitespace) (Trims trailing whitespace.)
+- [`check-added-large-files`](https://github.com/pre-commit/pre-commit-hooks#check-added-large-files) (Prevents giant files from being committed.)
+- [`check-case-conflict`](https://github.com/pre-commit/pre-commit-hooks#check-case-conflict) (Checks for files that would conflict in case-insensitive filesystems.)
+- [`check-illegal-windows-names`](https://github.com/pre-commit/pre-commit-hooks#check-illegal-windows-names) (Checks for filenames which cannot be created on Windows.)
+- [`end-of-file-fixer`](https://github.com/pre-commit/pre-commit-hooks#end-of-file-fixer) (Ensures that a file is either empty, or ends with one newline.)
+- [`file-contents-sorter`](https://github.com/pre-commit/pre-commit-hooks#file-contents-sorter) (Sorts the lines in specified files (defaults to alphabetical).)
+- [`requirements-txt-fixer`](https://github.com/pre-commit/pre-commit-hooks#requirements-txt-fixer) (Sorts entries in requirements.txt.)
+- [`fix-byte-order-marker`](https://github.com/pre-commit/pre-commit-hooks#fix-byte-order-marker) (Removes UTF-8 byte order marker.)
+- [`forbid-new-submodules`](https://github.com/pre-commit/pre-commit-hooks#forbid-new-submodules) (Prevents the addition of new Git submodules.)
+- [`check-json`](https://github.com/pre-commit/pre-commit-hooks#check-json) (Checks JSON files for parseable syntax.)
+- [`check-toml`](https://github.com/pre-commit/pre-commit-hooks#check-toml) (Checks TOML files for parseable syntax.)
+- [`check-vcs-permalinks`](https://github.com/pre-commit/pre-commit-hooks#check-vcs-permalinks) (Ensures that links to VCS websites are permalinks.)
+- [`check-yaml`](https://github.com/pre-commit/pre-commit-hooks#check-yaml) (Checks YAML files for parseable syntax.)
+- [`check-xml`](https://github.com/pre-commit/pre-commit-hooks#check-xml) (Checks XML files for parseable syntax.)
+- [`mixed-line-ending`](https://github.com/pre-commit/pre-commit-hooks#mixed-line-ending) (Replaces or checks mixed line endings.)
+- [`check-symlinks`](https://github.com/pre-commit/pre-commit-hooks#check-symlinks) (Checks for symlinks which do not point to anything.)
+- [`destroyed-symlinks`](https://github.com/pre-commit/pre-commit-hooks#destroyed-symlinks) (Detects symlinks that were replaced with regular files whose contents are the original symlink target path.)
+- [`check-merge-conflict`](https://github.com/pre-commit/pre-commit-hooks#check-merge-conflict) (Checks for files that contain merge conflict strings.)
+- [`detect-private-key`](https://github.com/pre-commit/pre-commit-hooks#detect-private-key) (Detects the presence of private keys.)
+- [`no-commit-to-branch`](https://github.com/pre-commit/pre-commit-hooks#no-commit-to-branch) (Protects specific branches from direct commits.)
+- [`check-shebang-scripts-are-executable`](https://github.com/pre-commit/pre-commit-hooks#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable.)
+- [`check-executables-have-shebangs`](https://github.com/pre-commit/pre-commit-hooks#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang.)
 
 #### Notes
 
-- `check-yaml` fast path does not yet support the `--unsafe` flag; for those cases, the automatic fast path is skipped.
 - `pretty-format-json` is currently available only via `repo: builtin` while parity coverage against upstream Python behavior is still being expanded.
 - Other hooks from the repository which have no fast path implementation will run via the standard method.
 
 ### Disabling the fast path
 
-If you need to compare with the original behavior or encounter differences:
+To use the pinned repository implementation for a single hook, explicitly set the language
+declared by that hook:
+
+```yaml
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        language: python  # Use the pinned repository implementation
+```
+
+To disable the fast path for every hook in a prek invocation:
 
 ```bash
 PREK_NO_FAST_PATH=1 prek run
@@ -83,42 +112,65 @@ This mode has significant benefits:
 
 **Note**: Configurations using `repo: builtin` are **not compatible** with the standard `pre-commit` tool.
 
-```yaml
-repos:
-  - repo: builtin
-    hooks:
-      - id: trailing-whitespace
-      - id: check-added-large-files
+=== "prek.toml"
+
+    ```toml
+    [[repos]]
+    repo = "builtin"
+    hooks = [
+      { id = "trailing-whitespace" },
+      { id = "check-added-large-files" },
+    ]
+    ```
+
+=== ".pre-commit-config.yaml"
+
+    ```yaml
+    repos:
+      - repo: builtin
+        hooks:
+          - id: trailing-whitespace
+          - id: check-added-large-files
+    ```
+
+List the builtins bundled with your installed prek version using:
+
+```bash
+prek util list-builtins -v
 ```
 
 ### Supported Hooks
 
 For `repo: builtin`, the following hooks are supported:
 
-- [`trailing-whitespace`](#trailing-whitespace) (Trim trailing whitespace)
-- [`check-added-large-files`](#check-added-large-files) (Prevent committing large files)
-- [`check-case-conflict`](#check-case-conflict) (Check for files that would conflict in case-insensitive filesystems)
-- [`check-illegal-windows-names`](#check-illegal-windows-names) (Check for filenames invalid on Windows)
-- [`end-of-file-fixer`](#end-of-file-fixer) (Ensure newline at EOF)
-- [`file-contents-sorter`](#file-contents-sorter) (Sort lines in explicitly targeted files)
-- [`fix-byte-order-marker`](#fix-byte-order-marker) (Remove UTF-8 byte order marker)
-- [`check-json`](#check-json) (Validate JSON files)
-- [`check-json5`](#check-json5) (Validate JSON5 files)
-- [`pretty-format-json`](#pretty-format-json) (Pretty format JSON files)
-- [`check-toml`](#check-toml) (Validate TOML files)
-- [`check-vcs-permalinks`](#check-vcs-permalinks) (Check that VCS links are permalinks)
-- [`check-yaml`](#check-yaml) (Validate YAML files)
-- [`check-xml`](#check-xml) (Validate XML files)
-- [`deny-pattern`](#deny-pattern) (Reject configured regular expression matches)
-- [`require-pattern`](#require-pattern) (Require each file to match a configured regular expression)
-- [`mixed-line-ending`](#mixed-line-ending) (Normalize or check line endings)
-- [`check-symlinks`](#check-symlinks) (Check for broken symlinks)
-- [`destroyed-symlinks`](#destroyed-symlinks) (Detect destroyed symlinks)
-- [`check-merge-conflict`](#check-merge-conflict) (Check for merge conflicts)
-- [`detect-private-key`](#detect-private-key) (Detect private keys)
-- [`no-commit-to-branch`](#no-commit-to-branch) (Prevent committing to protected branches)
-- [`check-shebang-scripts-are-executable`](#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable)
-- [`check-executables-have-shebangs`](#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang)
+- [`trailing-whitespace`](#trailing-whitespace) (Trims trailing whitespace.)
+- [`check-added-large-files`](#check-added-large-files) (Prevents giant files from being committed.)
+- [`check-case-conflict`](#check-case-conflict) (Checks for files that would conflict in case-insensitive filesystems.)
+- [`check-illegal-windows-names`](#check-illegal-windows-names) (Checks for filenames which cannot be created on Windows.)
+- [`end-of-file-fixer`](#end-of-file-fixer) (Ensures that a file is either empty, or ends with one newline.)
+- [`file-contents-sorter`](#file-contents-sorter) (Sorts the lines in specified files (defaults to alphabetical).)
+- [`requirements-txt-fixer`](#requirements-txt-fixer) (Sorts entries in requirements.txt.)
+- [`fix-byte-order-marker`](#fix-byte-order-marker) (Removes UTF-8 byte order marker.)
+- [`forbid-new-submodules`](#forbid-new-submodules) (Prevents the addition of new Git submodules.)
+- [`check-json`](#check-json) (Checks JSON files for parseable syntax.)
+- [`check-json5`](#check-json5) (Checks JSON5 files for parseable syntax.)
+- [`pretty-format-json`](#pretty-format-json) (Checks that JSON files are pretty-formatted.)
+- [`check-toml`](#check-toml) (Checks TOML files for parseable syntax.)
+- [`check-vcs-permalinks`](#check-vcs-permalinks) (Ensures that links to VCS websites are permalinks.)
+- [`check-yaml`](#check-yaml) (Checks YAML files for parseable syntax.)
+- [`check-xml`](#check-xml) (Checks XML files for parseable syntax.)
+- [`deny-filename-pattern`](#deny-filename-pattern) (Fails if any selected filename matches a regular expression.)
+- [`deny-pattern`](#deny-pattern) (Fails if any file contains a matching regular expression.)
+- [`require-filename-pattern`](#require-filename-pattern) (Fails if any selected filename does not match a regular expression.)
+- [`require-pattern`](#require-pattern) (Fails if any file does not contain a matching regular expression.)
+- [`mixed-line-ending`](#mixed-line-ending) (Replaces or checks mixed line endings.)
+- [`check-symlinks`](#check-symlinks) (Checks for symlinks which do not point to anything.)
+- [`destroyed-symlinks`](#destroyed-symlinks) (Detects symlinks that were replaced with regular files whose contents are the original symlink target path.)
+- [`check-merge-conflict`](#check-merge-conflict) (Checks for files that contain merge conflict strings.)
+- [`detect-private-key`](#detect-private-key) (Detects the presence of private keys.)
+- [`no-commit-to-branch`](#no-commit-to-branch) (Protects specific branches from direct commits.)
+- [`check-shebang-scripts-are-executable`](#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable.)
+- [`check-executables-have-shebangs`](#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang.)
 
 ### Hook Reference
 
@@ -259,6 +311,20 @@ repos:
 
 ---
 
+#### `requirements-txt-fixer`
+
+Sorts entries in Python `requirements*.txt` and `constraints*.txt` files by their case-insensitive requirement name.
+
+**Behavior / caveats**
+
+- The default file pattern is `(requirements|constraints).*\.txt$`.
+- Leading comments and continuation lines stay attached to their requirement while sorting. Top-of-file and trailing comment blocks are preserved.
+- Exact duplicate entries are collapsed, preferring the copy with an attached comment.
+- Exact `pkg-resources==0.0.0` and `pkg_resources==0.0.0` entries are removed, matching upstream.
+- This is a sorter, not a full PEP 508 validator. It uses the same lightweight name extraction as `pre-commit-hooks`.
+
+---
+
 #### `fix-byte-order-marker`
 
 Removes a UTF-8 byte order marker (BOM) from the beginning of a file.
@@ -270,6 +336,21 @@ Removes a UTF-8 byte order marker (BOM) from the beginning of a file.
 **Caveats**
 
 - Only removes the UTF-8 BOM (`EF BB BF`).
+
+---
+
+#### `forbid-new-submodules`
+
+Prevents the addition of new Git submodules.
+
+**Supported arguments**
+
+- None.
+
+**Behavior / caveats**
+
+- Existing submodules are allowed; only submodules newly added by the checked changes are reported.
+- Staged changes are checked by default. When `PRE_COMMIT_FROM_REF` and `PRE_COMMIT_TO_REF` are both set, their revision range is checked instead.
 
 ---
 
@@ -371,11 +452,8 @@ Attempts to load all YAML files to verify syntax.
 
 - `-m`, `--allow-multiple-documents` (alias: `--multi`)
     - Allow YAML multi-document syntax (`---`).
-
-**Caveats / differences**
-
-- `--unsafe` is not supported.
-    - With `repo: builtin`, passing `--unsafe` is treated as an unknown argument.
+- `--unsafe`
+    - Parse YAML syntax without loading it. Implies `--allow-multiple-documents`.
 
 ---
 
@@ -391,6 +469,33 @@ Attempts to load all XML files to verify syntax.
 
 - Empty files are treated as invalid XML.
 - Fails if there is “junk after the document element” (multiple top-level roots).
+
+---
+
+#### `deny-filename-pattern`
+
+Fails when the final path component (the basename) of any selected file matches a configured regular expression. Patterns use the [Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax). When multiple patterns are provided, the hook fails when a basename matches any one of them.
+
+The standard `files`, `exclude`, and type filters select which project-relative paths are checked. The patterns passed to this hook are then matched only against each selected basename.
+
+**Supported arguments**
+
+- `PATTERN...` (required)
+    - Positional regular expressions to deny.
+    - Use `--` before a pattern that begins with `-`.
+- `-i`, `--ignore-case`
+    - Match all patterns case-insensitively.
+
+Each matching file is reported once as `path: filename matches a denied pattern`.
+
+```yaml
+repos:
+  - repo: builtin
+    hooks:
+      - id: deny-filename-pattern
+        name: disallow spaces in filenames
+        args: ['\s']
+```
 
 ---
 
@@ -421,6 +526,27 @@ repos:
         name: disallow wildcard imports
         args: ['^\s*#import\s+.+:\s*\*']
         files: \.typ$
+```
+
+---
+
+#### `require-filename-pattern`
+
+Fails when the final path component (the basename) of any selected file does not match at least one configured regular expression. This is a per-file requirement: every selected basename must match, while different basenames may match different patterns.
+
+`require-filename-pattern` supports the same positional `PATTERN...` and `-i` / `--ignore-case` arguments as [`deny-filename-pattern`](#deny-filename-pattern). Matching uses search semantics; use `^` and `$` when the pattern must match the entire basename. Files without a match are reported as `path: filename does not match any required pattern`.
+
+```yaml
+repos:
+  - repo: builtin
+    hooks:
+      - id: require-filename-pattern
+        name: python tests naming
+        args:
+          - '^test_.*\.py$'
+          - '^__init__\.py$'
+          - '^conftest\.py$'
+        files: '(^|/)tests/.+\.py$'
 ```
 
 ---

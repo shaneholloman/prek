@@ -3,11 +3,13 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::string::ToString;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
+use asyncband::once::OnceMap;
 use itertools::Itertools;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+use rustc_hash::FxBuildHasher;
 use target_lexicon::{Architecture, HOST, OperatingSystem};
 use tracing::{debug, trace, warn};
 
@@ -17,6 +19,7 @@ use crate::fs::{LockedFile, is_executable};
 use crate::http::{REQWEST_CLIENT, download_artifact};
 use crate::languages::node::NodeRequest;
 use crate::languages::node::version::NodeVersion;
+use crate::languages::version::{ToolchainPolicy, ToolchainSource, find_system_executables};
 use crate::process::Cmd;
 use crate::store::Store;
 
@@ -24,7 +27,7 @@ use crate::store::Store;
 pub(crate) struct NodeResult {
     node: PathBuf,
     npm: PathBuf,
-    version: NodeVersion,
+    version: Arc<NodeVersion>,
 }
 
 impl Display for NodeResult {
@@ -49,11 +52,15 @@ impl NodeResult {
         let npm = bin_dir(dir)
             .join("npm")
             .with_extension(if cfg!(windows) { "cmd" } else { "" });
-        Self { node, npm, version }
+        Self {
+            node,
+            npm,
+            version: Arc::new(version),
+        }
     }
 
     pub(crate) async fn from_executables(node: PathBuf, npm: PathBuf) -> Result<Self> {
-        let version = query_node_version(&node).await?;
+        let version = query_node_version_cached(&node).await?;
         Ok(Self { node, npm, version })
     }
 
@@ -70,7 +77,11 @@ impl NodeResult {
     }
 }
 
-pub(crate) async fn query_node_version(node: &Path) -> Result<NodeVersion> {
+// Canonical paths let hook environments backed by the same Node executable share one query.
+static NODE_VERSION_CACHE: LazyLock<OnceMap<PathBuf, Arc<NodeVersion>, FxBuildHasher>> =
+    LazyLock::new(|| OnceMap::with_hasher(FxBuildHasher));
+
+async fn query_node_version(node: &Path) -> Result<NodeVersion> {
     // https://nodejs.org/api/process.html#processrelease
     let output = Cmd::new(node)
         .arg("-p")
@@ -80,6 +91,15 @@ pub(crate) async fn query_node_version(node: &Path) -> Result<NodeVersion> {
         .await?;
     let output_str = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&output_str).context("Failed to parse node version")
+}
+
+pub(crate) async fn query_node_version_cached(node: &Path) -> Result<Arc<NodeVersion>> {
+    let node = fs_err::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
+    NODE_VERSION_CACHE
+        .try_compute(node.clone(), async move || {
+            query_node_version(&node).await.map(Arc::new)
+        })
+        .await
 }
 
 pub(crate) struct NodeInstaller {
@@ -96,25 +116,25 @@ impl NodeInstaller {
         &self,
         store: &Store,
         request: &NodeRequest,
-        allows_download: bool,
+        policy: ToolchainPolicy,
     ) -> Result<NodeResult> {
         fs_err::tokio::create_dir_all(&self.root).await?;
 
         let _lock = LockedFile::acquire(self.root.join(".lock"), "node").await?;
 
-        if let Ok(node_result) = self.find_installed(request) {
-            trace!(%node_result, "Found installed node");
-            return Ok(node_result);
+        for &source in policy.search_order() {
+            let result = match source {
+                ToolchainSource::Managed => self.find_installed(request).ok(),
+                ToolchainSource::System => self.find_system_node(request).await?,
+            };
+            if let Some(result) = result {
+                trace!(%result, ?source, "Found node");
+                return Ok(result);
+            }
         }
 
-        // Find all node and npm executables in PATH and check their versions
-        if let Some(node_result) = self.find_system_node(request).await? {
-            trace!(%node_result, "Using system node");
-            return Ok(node_result);
-        }
-
-        if !allows_download {
-            anyhow::bail!("No suitable system Node version found and downloads are disabled");
+        if !policy.allows_download() {
+            anyhow::bail!("No suitable Node version found for toolchain policy: {policy}");
         }
 
         let resolved_version = self.resolve_version(request).await?;
@@ -250,7 +270,7 @@ impl NodeInstaller {
 
     /// Find a suitable system Node.js installation that matches the request.
     async fn find_system_node(&self, node_request: &NodeRequest) -> Result<Option<NodeResult>> {
-        let node_paths = match which::which_all(&*NODE_BINARY_NAME) {
+        let node_paths = match find_system_executables(&*NODE_BINARY_NAME, &self.root) {
             Ok(paths) => paths,
             Err(e) => {
                 debug!("No node executables found in PATH: {}", e);

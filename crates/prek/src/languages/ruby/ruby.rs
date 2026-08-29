@@ -1,6 +1,5 @@
 use std::env::consts::EXE_EXTENSION;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,15 +8,11 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
 use crate::languages::ruby::RubyRequest;
 use crate::languages::ruby::gem::{build_gemspecs, install_gems};
 use crate::languages::ruby::installer::{RubyInstaller, query_ruby_version};
-use crate::languages::version::LanguageRequest;
-use crate::process::Cmd;
-use crate::run::run_by_batch;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::store::{Store, ToolBucket};
 
 #[derive(Debug, Copy, Clone)]
@@ -29,6 +24,7 @@ impl LanguageBackend for Ruby {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -37,14 +33,10 @@ impl LanguageBackend for Ruby {
         let ruby_dir = store.tools_path(ToolBucket::Ruby);
         let installer = RubyInstaller::new(ruby_dir);
 
-        let (request, allows_download) = match &hook.language_request {
-            LanguageRequest::Any { system_only } => (&RubyRequest::Any, !system_only),
-            LanguageRequest::Ruby(req) => (req, true),
-            _ => unreachable!(),
-        };
+        let request: &RubyRequest = hook.language_request.version();
 
         let ruby = installer
-            .install(store, request, allows_download)
+            .install(store, request, hook.language_request.toolchain_policy())
             .await
             .context("Failed to install Ruby")?;
 
@@ -80,6 +72,7 @@ impl LanguageBackend for Ruby {
             &gem_home,
             hook.repo_path(),
             &hook.additional_dependencies,
+            install_cwd,
         )
         .await
         .context("Failed to install gems")?;
@@ -126,68 +119,27 @@ impl LanguageBackend for Ruby {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Ruby hook must have env path");
-
-        // Prepare PATH
         let gem_home = gem_home(env_dir);
         let gem_bin = gem_bin(env_dir);
         let ruby_bin = hook
             .toolchain_dir()
             .expect("Ruby toolchain should have parent");
-
         let new_path = prepend_paths(&[&gem_bin, ruby_bin]).context("Failed to join PATH")?;
 
-        // Resolve entry point
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-
-        // Execute in batches
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::GEM_HOME, &gem_home)
-                .env(EnvVars::BUNDLE_IGNORE_CONFIG, "1")
-                .env_remove(EnvVars::GEM_PATH)
-                .env_remove(EnvVars::BUNDLE_GEMFILE)
-                .envs(&hook.env)
-                .args(&entry[1..])
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        // Combine results
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::GEM_HOME, &gem_home)
+            .env(EnvVars::BUNDLE_IGNORE_CONFIG, "1")
+            .env_remove(EnvVars::GEM_PATH)
+            .env_remove(EnvVars::BUNDLE_GEMFILE);
+        Ok(environment)
     }
 }
 

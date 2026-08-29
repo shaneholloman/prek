@@ -43,9 +43,9 @@ The cooldown age is computed from the tag creation timestamp for annotated tags,
 
     If the current `rev` is newer than the latest cooldown-eligible tag, [`prek update`](cli.md#prek-update) keeps the current `rev` instead of downgrading it.
 
-!!! note "Compatibility alias"
+## Extension keys (`x-`)
 
-    The legacy `auto_update` key is still accepted as an alias for `update`.
+Any key starting with `x-` (a lowercase `x` followed by a hyphen) is silently ignored by `prek` at any level of the configuration. This supports custom metadata without triggering unexpected key warnings.
 
 ## Top-level keys
 
@@ -249,7 +249,7 @@ This is a global default; individual hooks can also set `fail_fast`.
 
 ### `default_language_version`
 
-Map a language name to the default [`language_version`](#language_version) used by hooks of that language.
+Map a language name to the default [`language_version`](#language_version) used by hooks of that language. Each value can be a request string or an options map.
 
 - Type: map
 - Default: none (hooks fall back to `language_version: default`)
@@ -260,7 +260,7 @@ Example:
 
     ```toml
     default_language_version.python = "3.12"
-    default_language_version.node = "20"
+    default_language_version.node = { request = "20", preference = "only-managed" }
     ```
 
 === ".pre-commit-config.yaml"
@@ -268,10 +268,15 @@ Example:
     ```yaml
     default_language_version:
       python: "3.12"
-      node: "20"
+      node:
+        request: "20"
+        preference: only-managed
     ```
 
 `prek` treats [`language_version`](#language_version) as a version request (often a semver-like selector) and may install toolchains automatically. See [Difference from pre-commit](../diff.md).
+
+Defaults are applied field by field. For example, a hook can override only the
+`request` while retaining the default `preference` for its language.
 
 ### `default_stages`
 
@@ -402,10 +407,6 @@ CLI filters have the highest precedence. `--include-tag` and `--exclude-tag` rep
 
 In workspace mode, `update` is scoped to the project config file that defines it and is not inherited by nested projects. Sub-projects use their own `update`, then the user-level global config, then built-in defaults. Repositories shared by multiple projects are fetched once but evaluated with each project's cooldown, freeze, and tag-filter settings.
 
-!!! note "Compatibility alias"
-
-    The legacy `auto_update` key is still accepted as an alias for `update`.
-
 ### `minimum_prek_version`
 
 <a id="prek-only-minimum-prek-version-config"></a>
@@ -506,8 +507,9 @@ In most configs this is a git URL.
 
 The revision to use for the remote repository.
 
-Use a tag or commit SHA for repeatable results.
-If you use a moving target (like a branch name), runs may change over time.
+Use a full commit SHA when an immutable Git pin is required. Version tags are
+readable and conventional for releases, but a repository maintainer can move a
+tag. Branch names are moving targets, so runs may change over time.
 
 #### `hooks`
 
@@ -540,7 +542,7 @@ Example:
 
 Notes:
 
-- For reproducibility, prefer immutable pins (tags or commit SHAs).
+- For reproducibility, prefer a versioned release tag or an immutable commit SHA.
 - [`prek update`](cli.md#prek-update) can help update [`rev`](#rev) values.
 
 ### `repo: local`
@@ -753,6 +755,10 @@ The command line to execute for the hook.
 - Required for `repo: local` hooks.
 - Optional override for remote hooks.
 - Not allowed for `repo: meta` and `repo: builtin`.
+
+The repository type, language, and optional `shell` setting determine how this
+value is interpreted. See [Hook entry resolution](../internals.md#hook-entry-resolution)
+for the command, path, and working-directory rules.
 
 If [`pass_filenames`](#pass_filenames) is `true`, `prek` appends matching filenames to this command when running.
 
@@ -1143,8 +1149,16 @@ Tag a hook with user-defined run groups.
 - Type: list of strings
 - Default: `[]`
 
-Groups are arbitrary labels used by [`prek run --group <group>`](cli.md#prek-run--group) and [`prek run --no-group <group>`](cli.md#prek-run--no-group).
-Group names cannot be empty or contain whitespace.
+Groups are arbitrary labels used by [`prek run --group <group>`](cli.md#prek-run--group),
+[`prek run --require-group <group>`](cli.md#prek-run--require-group), and
+[`prek run --no-group <group>`](cli.md#prek-run--no-group).
+Group names cannot be empty, contain whitespace, or start with `@`. Names that
+start with `@` are reserved for special selectors:
+
+- `@ungrouped` matches hooks whose effective `groups` list is empty.
+
+This selector works with `--group`, `--require-group`, and `--no-group`. It is a
+virtual membership and cannot be added to a hook's `groups` list.
 
 `groups` is a project configuration field. If it appears in a remote
 `.pre-commit-hooks.yaml` manifest, `prek` ignores it.
@@ -1199,6 +1213,18 @@ Run only the `ci` group:
 prek run --all-files --group ci
 ```
 
+Run the `ci` group together with ungrouped hooks:
+
+```bash
+prek run --all-files --group ci --group @ungrouped
+```
+
+Run only hooks belonging to both `lint` and `ci`:
+
+```bash
+prek run --all-files --require-group lint --require-group ci
+```
+
 Run everything except formatters:
 
 ```bash
@@ -1207,13 +1233,32 @@ prek run --all-files --no-group format
 
 If a hook matches both `--group` and `--no-group`, `--no-group` wins.
 
-When `--group` or `--no-group` is used without `--stage`, group filtering is
-not constrained by hook stage. `prek run` collects normal file input for the
-manual command and runs every matching hook that can use that input. Hooks
-configured only for `commit-msg` and/or `prepare-commit-msg` require Git's
-message file argument, so they are ignored unless run in the corresponding
-hook stage. If every matching hook is ignored this way, `prek run` warns and
-fails.
+Repeated `--group` values use union semantics, while repeated
+`--require-group` values use intersection semantics. When combined, a hook must
+match at least one `--group`, every `--require-group`, and no `--no-group`.
+
+For example, consider these hook groups:
+
+| Hook | Groups |
+| -- | -- |
+| `ty` | `lint-only`, `fast`, `local` |
+| `ruff-format` | `format`, `fast`, `local` |
+| `mypy` | `lint-only`, `slow`, `ci` |
+| `black` | `format`, `slow`, `ci` |
+
+```bash
+prek run --all-files --require-group fast --group format --group lint-only
+```
+
+This represents `fast AND (format OR lint-only)`, so it selects exactly `ty`
+and `ruff-format`. Reordering the options does not change the selection.
+
+When any group selector is used without `--stage`, group filtering is not
+constrained by hook stage. `prek run` collects normal file input for the manual
+command and runs every matching hook that can use that input. Hooks configured
+only for `commit-msg` and/or `prepare-commit-msg` require Git's message file
+argument, so they are ignored unless run in the corresponding hook stage. If
+every matching hook is ignored this way, `prek run` warns and fails.
 
 ### `require_serial`
 
@@ -1359,20 +1404,22 @@ Print hook output even when the hook succeeds.
 ### `log_file`
 
 Write hook output to a file when the hook fails (and also when `verbose: true`).
+Relative paths are resolved from the directory containing the configuration file.
 
 - Type: string path
 
 ### `description`
 
-Free-form description shown in listings / metadata.
+Free-form description shown in listings / metadata. Its first line is also included in failure and
+verbose run details.
 
 - Type: string
 
 ### `language_version`
 
-Choose the language/toolchain version request for this hook.
+Choose the language/toolchain version request and source preference for this hook.
 
-- Type: string
+- Type: string or map
 - Default: `default`
 
 If not set, `prek` may use [`default_language_version`](#default_language_version) for the hook’s language.
@@ -1384,7 +1431,25 @@ If not set, `prek` may use [`default_language_version`](#default_language_versio
     Special values:
 
     - `default`: use the language’s default resolution logic.
-    - `system`: require a system-installed toolchain (no downloads).
+    - `system`: do not download a new toolchain. A compatible toolchain already managed by prek may still be reused, and project metadata can further constrain the required version.
+
+    The map form accepts these fields:
+
+    - `request`: the same version request accepted by the string form. It defaults to `default`.
+    - `preference`: controls which toolchain sources prek searches and in what order. It defaults to `managed`.
+
+    `preference` accepts:
+
+    - `only-managed`: use an existing prek-managed toolchain, or download one.
+    - `managed`: prefer an existing prek-managed toolchain, then search outside prek's managed store, then download one.
+    - `system`: prefer a toolchain outside prek's managed store, then try an existing prek-managed toolchain, then download one.
+    - `only-system`: only search outside prek's managed store and never download a toolchain.
+
+    A “system” toolchain is any toolchain discovered outside prek's managed store,
+    including one installed by an operating-system package manager or version manager.
+
+    The preference affects toolchain selection when a hook environment must be
+    created. It does not affect reuse of an existing compatible hook environment.
 
     Language-specific behavior:
 
@@ -1401,7 +1466,7 @@ If not set, `prek` may use [`default_language_version`](#default_language_versio
         ```toml
         hooks = [
           { id = "ruff", language = "python", language_version = "3.12" },
-          { id = "eslint", language = "node", language_version = "20" },
+          { id = "eslint", language = "node", language_version = { request = "20", preference = "only-managed" } },
           { id = "cargo-fmt", language = "rust", language_version = "stable" },
           { id = "my-tool", language = "system", language_version = "system" },
         ]
@@ -1417,7 +1482,9 @@ If not set, `prek` may use [`default_language_version`](#default_language_versio
 
           - id: eslint
             language: node
-            language_version: "20"
+            language_version:
+              request: "20"
+              preference: only-managed
 
           - id: cargo-fmt
             language: rust

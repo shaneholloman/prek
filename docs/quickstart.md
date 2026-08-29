@@ -35,47 +35,84 @@ From here you can explore what prek adds on top of pre-commit:
 
 Follow this short example to experience how prek automates linting and formatting tasks.
 
-### 1. Create a configuration
+### 1. Initialize the repository
 
-In the root of your repository, add a `prek.toml`:
+Run `prek init` from anywhere in your Git worktree:
+
+```bash
+prek init
+```
+
+This creates a starter `prek.toml` at the Git worktree root and installs the
+`pre-commit` Git shim. If the root already has a supported configuration file,
+prek keeps it unchanged and installs the shim.
+
+The generated configuration uses prek's built-in hooks:
 
 ```toml
 [[repos]]
-repo = "https://github.com/pre-commit/pre-commit-hooks"
-rev = "v6.0.0"
+repo = "builtin"
 hooks = [
-  { id = "check-yaml" },
+  { id = "trailing-whitespace" },
   { id = "end-of-file-fixer" },
+  { id = "check-added-large-files" },
 ]
 ```
-
-This configuration uses the `pre-commit-hooks` repository and enables two hooks: `check-yaml` validates YAML files, and `end-of-file-fixer` ensures every file ends with a newline.
 
 !!! note
 
     `prek.toml` is the native configuration file for **prek**. If you already have a `.pre-commit-config.yaml`, prek can still read it today.
 
-Once you’re happy with your setup, you can stage the config file with `git add prek.toml`.
+Add a small YAML file so the first run has something to check, then stage both
+files:
+
+```yaml title="example.yaml"
+project: prek
+enabled: true
+```
+
+```bash
+git add prek.toml example.yaml
+```
+
+`prek run` checks the staged snapshot, so a new or changed config must be staged
+before this default run. You can still review or unstage it after trying the
+workflow.
 
 ### 2. Run hooks on demand
 
 Use `prek run` to execute all configured hooks on the files in your current git staging area:
 
-```bash
-prek run
+```console
+$ prek run
+trim trailing whitespace.................................................Passed
+fix end of files.........................................................Passed
+check for added large files..............................................Passed
 ```
 
-Need to run a single hook? Pass its ID, for example `prek run check-yaml`. You can also target specific files with `--files`, or run against the entire repository with `--all-files`.
+The first run can take longer because prek downloads the hook repository and
+prepares its environment.
 
-### 3. Wire hooks into git automatically
+Need to run a single hook? Pass its ID, for example `prek run trailing-whitespace`. You can also target specific files with `--files`, or run against the entire repository with `--all-files`. Use `--all-files` after adding or changing a hook to check existing files that are not staged.
 
-To run the hooks every time you commit, install prek’s Git shim integration:
+### 3. Customize the hooks
 
-```bash
-prek install
+Edit the generated configuration to add or remove hooks. For example, add Ruff
+to lint and format Python files:
+
+```toml
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.16.0"
+hooks = [
+  { id = "ruff-check" },
+  { id = "ruff-format" },
+]
 ```
 
-Now every `git commit` will invoke `prek run` for the files included in the commit. If you ever want to undo this, run `prek uninstall`.
+Because `prek init` installed the Git shim, every `git commit` invokes the
+configured hooks for the files in that commit. Run `prek install` to reinstall
+the shim later, or `prek uninstall` to remove it.
 
 ### 4. Go further
 

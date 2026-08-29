@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,11 +11,10 @@ use serde_json::{Map, Value, json};
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 const COMPOSER_JSON: &str = "composer.json";
@@ -141,6 +139,7 @@ impl LanguageBackend for Php {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -192,16 +191,19 @@ impl LanguageBackend for Php {
                 .context("Failed to join PATH")?;
 
             composer_command(&composer, &info.env_path, &path_env)
+                .current_dir(install_cwd)
                 .arg("require")
                 .arg("--no-progress")
                 .arg("--")
                 .args(dependencies)
+                .sanitize_git_repo_env()
                 .check(true)
                 .output()
                 .await
                 .context("Failed to install PHP dependencies with Composer")?;
 
             composer_command(&composer, &info.env_path, &path_env)
+                .current_dir(install_cwd)
                 .arg("check-platform-reqs")
                 .check(true)
                 .output()
@@ -234,54 +236,21 @@ impl LanguageBackend for Php {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
+    ) -> Result<ExecutionEnvironment> {
         let env_path = hook.env_path().expect("PHP must have env path");
         let php_bin = hook
             .toolchain_dir()
             .expect("PHP executable must have a parent directory");
         let path_env =
             prepend_paths(&[&bin_dir(env_path), php_bin]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&path_env), store)?;
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &path_env)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment.set_path(&path_env);
+        Ok(environment)
     }
 }
 

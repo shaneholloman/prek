@@ -1,6 +1,8 @@
 # Integrations
 
-This page documents common ways to integrate prek into CI and container workflows.
+This page documents packaged integrations for CI and container workflows. For
+CI behavior that applies across providers, including revision ranges, caches,
+and credentials, see [Continuous Integration](ci.md).
 
 ## Docker
 
@@ -26,13 +28,13 @@ A common pattern is to copy the binary into your own image:
 
 ```dockerfile
 FROM debian:bookworm-slim
-COPY --from=ghcr.io/j178/prek:0.4.10 /prek /usr/local/bin/prek
+COPY --from=ghcr.io/j178/prek:0.5.0 /prek /usr/local/bin/prek
 ```
 
 If you prefer, you can also run the distroless image directly:
 
 ```bash
-docker run --rm ghcr.io/j178/prek:0.4.10 --version
+docker run --rm ghcr.io/j178/prek:0.5.0 --version
 ```
 
 ### Alpine
@@ -40,7 +42,7 @@ docker run --rm ghcr.io/j178/prek:0.4.10 --version
 The Alpine variant includes `prek`, Git, CA certificates, a shell, and the Alpine package manager.
 
 ```bash
-docker run --rm ghcr.io/j178/prek:0.4.10-alpine --version
+docker run --rm ghcr.io/j178/prek:0.5.0-alpine --version
 ```
 
 Use `X.Y.Z-alpine3.24` to pin both the prek and Alpine versions, or `alpine3.24` to pin only the
@@ -67,7 +69,7 @@ Loaded 1 attestation from GitHub API
 
 !!! tip
 
-    Use a specific version tag (e.g., `ghcr.io/j178/prek:0.4.10`) or image
+    Use a specific version tag (e.g., `ghcr.io/j178/prek:0.5.0`) or image
     digest rather than `latest` for verification.
 
 ## GitHub Actions

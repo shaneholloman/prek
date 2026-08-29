@@ -1,19 +1,17 @@
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use mea::once::OnceCell;
+use asyncband::once::OnceCell;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 static CABAL_UPDATE_ONCE: OnceCell<()> = OnceCell::new();
@@ -32,6 +30,7 @@ impl LanguageBackend for Haskell {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -43,9 +42,10 @@ impl LanguageBackend for Haskell {
         let bin_dir = info.env_path.join("bin");
         fs_err::tokio::create_dir_all(&bin_dir).await?;
 
-        // Identify packages: *.cabal files in repo + additional_dependencies
-        let search_path = hook.repo_path().unwrap_or_else(|| hook.project().path());
-        let pkgs = fs_err::read_dir(search_path)?
+        let project_dir = hook.repo_path().unwrap_or(hook.work_dir());
+        // A Cabal package file is named `<package>.cabal`, so its stem is a cwd-independent package
+        // target. `--project-dir` below locates the source without making it the process cwd.
+        let project_targets = fs_err::read_dir(project_dir)?
             .flatten()
             .filter_map(|entry| {
                 let path = entry.path();
@@ -54,16 +54,15 @@ impl LanguageBackend for Haskell {
                         .extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("cabal"))
                 {
-                    path.file_name()
+                    path.file_stem()
                         .map(|name| name.to_string_lossy().into_owned())
                 } else {
                     None
                 }
             })
-            .chain(hook.additional_dependencies.iter().cloned())
             .collect::<Vec<_>>();
 
-        if pkgs.is_empty() {
+        if project_targets.is_empty() && hook.additional_dependencies.is_empty() {
             anyhow::bail!("Expected .cabal files or additional_dependencies");
         }
 
@@ -73,6 +72,7 @@ impl LanguageBackend for Haskell {
             CABAL_UPDATE_ONCE
                 .get_or_try_init(async || {
                     Cmd::new("cabal")
+                        .current_dir(install_cwd)
                         .arg("update")
                         .check(true)
                         .output()
@@ -83,17 +83,17 @@ impl LanguageBackend for Haskell {
                 .await?;
         }
 
-        // cabal v2-install --installdir <bindir> <pkgs> (default install-method is copy)
-        Cmd::new("cabal")
-            .current_dir(search_path)
-            .arg("v2-install")
-            .arg("--installdir")
-            .arg(&bin_dir)
-            .args(pkgs)
-            .check(true)
-            .output()
-            .await
-            .context("Failed to install haskell dependencies")?;
+        if !project_targets.is_empty() {
+            cabal_install(install_cwd, &bin_dir, &project_targets, Some(project_dir))
+                .await
+                .context("Failed to install Haskell hook project")?;
+        }
+
+        if !hook.additional_dependencies.is_empty() {
+            cabal_install(install_cwd, &bin_dir, &hook.additional_dependencies, None)
+                .await
+                .context("Failed to install Haskell additional dependencies")?;
+        }
 
         info.persist_env_path();
 
@@ -109,53 +109,40 @@ impl LanguageBackend for Haskell {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Haskell must have env path");
-        let bin_dir = env_dir.join("bin");
-        let new_path = prepend_paths(&[&bin_dir]).context("Failed to join PATH")?;
+        let new_path = prepend_paths(&[&env_dir.join("bin")]).context("Failed to join PATH")?;
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment.set_path(&new_path);
+        Ok(environment)
     }
+}
+
+// Project targets need an explicit source directory because local installs run elsewhere.
+// Additional dependencies omit it so relative targets resolve from `install_cwd`.
+async fn cabal_install(
+    install_cwd: &Path,
+    bin_dir: &Path,
+    targets: &[String],
+    project_dir: Option<&Path>,
+) -> Result<()> {
+    let mut command = Cmd::new("cabal");
+    command.current_dir(install_cwd).arg("v2-install");
+    if let Some(project_dir) = project_dir {
+        command.arg("--project-dir").arg(project_dir);
+    }
+    command
+        .arg("--installdir")
+        .arg(bin_dir)
+        .args(targets)
+        .sanitize_git_repo_env()
+        .check(true)
+        .output()
+        .await?;
+    Ok(())
 }

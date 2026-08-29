@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,14 +7,11 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
 use crate::languages::dotnet::DotnetRequest;
 use crate::languages::dotnet::installer::{DotnetInstaller, DotnetResult};
-use crate::languages::version::LanguageRequest;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::{Store, ToolBucket};
 
 #[derive(Debug, Copy, Clone)]
@@ -44,18 +40,15 @@ impl LanguageBackend for Dotnet {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
 
         let installer = DotnetInstaller::new(store.tools_path(ToolBucket::Dotnet));
-        let (request, allows_download) = match &hook.language_request {
-            LanguageRequest::Any { system_only } => (&DotnetRequest::Any, !system_only),
-            LanguageRequest::Dotnet(request) => (request, true),
-            _ => unreachable!(),
-        };
+        let request: &DotnetRequest = hook.language_request.version();
         let dotnet = installer
-            .install(request, allows_download)
+            .install(request, hook.language_request.toolchain_policy())
             .await
             .context("Failed to install dotnet SDK")?;
 
@@ -70,7 +63,7 @@ impl LanguageBackend for Dotnet {
         if !hook.additional_dependencies.is_empty() {
             fs_err::tokio::create_dir_all(&tools_dir).await?;
             for dependency in &hook.additional_dependencies {
-                install_tool(dotnet.dotnet(), &tools_dir, dependency).await?;
+                install_tool(dotnet.dotnet(), &tools_dir, dependency, install_cwd).await?;
             }
         }
 
@@ -107,15 +100,11 @@ impl LanguageBackend for Dotnet {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("dotnet hook must have env path");
         let tools_dir = tools_dir(env_dir);
         let dotnet = &hook
@@ -123,44 +112,13 @@ impl LanguageBackend for Dotnet {
             .expect("dotnet hook must have install info")
             .toolchain;
         let dotnet_root = resolve_dotnet_root(dotnet).context("Failed to resolve DOTNET_ROOT")?;
-
         let new_path = prepend_paths(&[&tools_dir, &dotnet_root]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::DOTNET_ROOT, &dotnet_root)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::DOTNET_ROOT, &dotnet_root);
+        Ok(environment)
     }
 }
 
@@ -169,7 +127,12 @@ impl LanguageBackend for Dotnet {
 /// The dependency can be specified as:
 /// - `package` - installs latest version
 /// - `package:version` - installs specific version
-async fn install_tool(dotnet: &Path, tool_dir: &Path, dependency: &str) -> Result<()> {
+async fn install_tool(
+    dotnet: &Path,
+    tool_dir: &Path,
+    dependency: &str,
+    install_cwd: &Path,
+) -> Result<()> {
     let (package, version) = dependency
         .split_once(':')
         .map_or((dependency, None), |(package, version)| {
@@ -178,7 +141,8 @@ async fn install_tool(dotnet: &Path, tool_dir: &Path, dependency: &str) -> Resul
 
     let tool_cmd = |action: &str| {
         let mut cmd = Cmd::new(dotnet);
-        cmd.arg("tool")
+        cmd.current_dir(install_cwd)
+            .arg("tool")
             .arg(action)
             .arg("--tool-path")
             .arg(tool_dir)

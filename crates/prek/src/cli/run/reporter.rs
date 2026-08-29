@@ -16,7 +16,8 @@
 //! header, the collapsed hidden-summary row, and completed hook rows. A
 //! completed hook moves from `running` into its project's `CompletedBars` before
 //! the running lock is released, so other layout operations never observe the
-//! hook as missing from both states.
+//! hook as missing from both states. It remains there until the group is
+//! cleared, collapsed, or filtered from the report.
 //!
 //! # Visual order and anchors
 //!
@@ -55,20 +56,24 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
+use std::debug_assert_matches;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use console::{Term, strip_ansi_codes};
+use anstyle_parse::{DefaultCharAccumulator, Parser, Perform};
+use console::Term;
 use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use rustc_hash::FxHashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::cli::reporter::{ProgressReporter, SPINNER_TICKS, set_current_reporter};
-use crate::hook::Hook;
+use crate::hook::{Hook, HookKey};
 use crate::printer::Printer;
 use crate::process::OutputSink;
 use crate::workspace;
+
+use super::{FAILED, PASSED};
 
 /// UI state for one hook run.
 ///
@@ -76,7 +81,7 @@ use crate::workspace;
 /// `HOOK_OUTPUT_PREVIEW_LINES` preview lines inserted directly below it.
 /// While the hook is running, `HookRunReporter::running` owns this value. After
 /// the hook completes, it moves into the owning project's `HookGroup::completed`
-/// until the group is cleared or collapsed.
+/// until the group is cleared, collapsed, or filtered from the report.
 #[derive(Debug)]
 struct HookBar {
     /// Stable identity used to match a completed bar with the later hook result.
@@ -99,7 +104,7 @@ struct HookBar {
 impl HookBar {
     fn new(hook: &Hook, line_order: usize, progress: ProgressBar) -> Self {
         Self {
-            hook_key: HookKey::from_hook(hook),
+            hook_key: hook.key(),
             line_order,
             progress,
             output_bars: Vec::new(),
@@ -157,21 +162,6 @@ impl HookBar {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HookKey {
-    project_idx: usize,
-    hook_idx: usize,
-}
-
-impl HookKey {
-    fn from_hook(hook: &Hook) -> Self {
-        Self {
-            project_idx: hook.project().idx(),
-            hook_idx: hook.idx,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct CompletedBars {
     visible: BTreeMap<usize, HookBar>,
@@ -197,7 +187,7 @@ impl CompletedBars {
         // Hooks can finish in a different order than their progress rows were inserted;
         // collapse completed rows by their original visual order.
         let replaced = self.visible.insert(completed.line_order, completed);
-        debug_assert!(replaced.is_none());
+        debug_assert_matches!(replaced, None);
     }
 
     fn collapse_one_line(&mut self) -> Option<CollapsedCompletedBars> {
@@ -232,6 +222,14 @@ impl CompletedBars {
         }
 
         None
+    }
+
+    fn remove_hook(&mut self, hook_key: HookKey) -> Option<HookBar> {
+        let (&line_order, _) = self
+            .visible
+            .iter()
+            .find(|(_, completed)| completed.hook_key == hook_key)?;
+        self.visible.remove(&line_order)
     }
 
     fn line_count(&self) -> usize {
@@ -354,46 +352,56 @@ pub(crate) fn project_status_marker(failed: bool) -> String {
     }
 }
 
-/// Rolling text preview for a running hook's streamed output.
-///
-/// `lines` is always the visible window, capped at `HOOK_OUTPUT_PREVIEW_LINES`.
-/// If `line_open` is true, the last line is still accepting characters from the
-/// current unterminated output line. A pending carriage return either joins a
-/// following `\n` as CRLF or clears that current line to emulate terminal
-/// "overwrite this line" output.
+/// Incrementally decodes a hook's output into a rolling plain-text preview.
 #[derive(Debug, Default)]
 struct OutputPreview {
+    // The parser contains fixed protocol buffers and would otherwise dominate `HookBar`'s size.
+    parser: Box<Parser<DefaultCharAccumulator>>,
+    text: PreviewText,
+}
+
+impl OutputPreview {
+    fn push_chunk(&mut self, chunk: &[u8]) {
+        for byte in chunk {
+            self.parser.advance(&mut self.text, *byte);
+        }
+    }
+
+    fn visible_lines(&self) -> &[String] {
+        &self.text.lines
+    }
+}
+
+/// The visible preview window produced by [`OutputPreview`].
+///
+/// A pending carriage return either joins a following line feed as CRLF or
+/// clears the current line, matching the overwrite convention used by progress
+/// displays.
+#[derive(Debug, Default)]
+struct PreviewText {
     lines: Vec<String>,
     line_open: bool,
     pending_cr: bool,
 }
 
-impl OutputPreview {
-    fn push_chunk(&mut self, chunk: &[u8]) {
-        // Preview text is lossy by design: the full bytes are still collected by `process`.
-        let text = String::from_utf8_lossy(chunk);
-        let text = strip_ansi_codes(&text);
-        for ch in text.chars().filter(|ch| is_preview_char(*ch)) {
-            if self.pending_cr {
-                if ch == '\n' {
-                    self.finish_line();
-                    self.pending_cr = false;
-                    continue;
-                }
-                self.current_line_mut().clear();
+impl PreviewText {
+    fn push_char(&mut self, ch: char) {
+        if self.pending_cr {
+            if ch == '\n' {
+                self.finish_line();
                 self.pending_cr = false;
+                return;
             }
-            match ch {
-                '\n' => self.finish_line(),
-                '\r' => self.pending_cr = true,
-                '\t' => self.current_line_mut().push(' '),
-                ch => self.current_line_mut().push(ch),
-            }
+            self.current_line_mut().clear();
+            self.pending_cr = false;
         }
-    }
-
-    fn visible_lines(&self) -> &[String] {
-        &self.lines
+        match ch {
+            '\n' => self.finish_line(),
+            '\r' => self.pending_cr = true,
+            '\t' => self.current_line_mut().push(' '),
+            ch if !ch.is_control() => self.current_line_mut().push(ch),
+            _ => {}
+        }
     }
 
     fn current_line_mut(&mut self) -> &mut String {
@@ -423,8 +431,16 @@ impl OutputPreview {
     }
 }
 
-fn is_preview_char(ch: char) -> bool {
-    matches!(ch, '\n' | '\r' | '\t') || !ch.is_control()
+impl Perform for PreviewText {
+    fn print(&mut self, c: char) {
+        self.push_char(c);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        if matches!(byte, b'\n' | b'\r' | b'\t') {
+            self.push_char(char::from(byte));
+        }
+    }
 }
 
 const HOOK_OUTPUT_PREVIEW_LINES: usize = 3;
@@ -555,9 +571,9 @@ impl HookRunReporter {
         };
 
         let label = if self.show_project_headers {
-            format!("  {}", hook.name)
+            Cow::Owned(format!("  {}", hook.name))
         } else {
-            hook.name.clone()
+            Cow::Borrowed(hook.name.as_str())
         };
         let dots = self.dots.saturating_sub(label.width());
         progress.set_style(
@@ -565,7 +581,7 @@ impl HookRunReporter {
                 .unwrap()
                 .progress_chars(".."),
         );
-        progress.set_message(label);
+        progress.set_message(label.into_owned());
         progress
     }
 
@@ -641,8 +657,22 @@ impl HookRunReporter {
         }
     }
 
+    pub fn hide_run_result(&self, hook: &Hook) {
+        // Hidden results never record `passed`, so they cannot enter the collapsed summary.
+        let hook_key = hook.key();
+        let completed = {
+            let mut groups = self.groups.lock().unwrap();
+            groups
+                .get_mut(&hook_key.project_idx)
+                .and_then(|group| group.completed.remove_hook(hook_key))
+        };
+        if let Some(completed) = completed {
+            self.remove_hook_bar(completed);
+        }
+    }
+
     pub fn on_run_result(&self, hook: &Hook, passed: bool) {
-        let hook_key = HookKey::from_hook(hook);
+        let hook_key = hook.key();
         let progress = {
             let mut groups = self.groups.lock().unwrap();
             let Some(group) = groups.get_mut(&hook_key.project_idx) else {
@@ -655,15 +685,11 @@ impl HookRunReporter {
         };
 
         let label = progress.message();
-        let (status, status_width) = if passed {
-            ("Passed".on_green().to_string(), "Passed".width())
-        } else {
-            ("Failed".on_red().to_string(), "Failed".width())
-        };
+        let status = if passed { PASSED } else { FAILED };
         let dots = self
             .dots
             .saturating_add("Passed".width())
-            .saturating_sub(label.width() + status_width);
+            .saturating_sub(label.width() + status.inner().width());
         let dots = ".".repeat(dots).green().to_string();
 
         progress.set_style(ProgressStyle::with_template("{wide_msg}").unwrap());
@@ -687,6 +713,18 @@ impl HookRunReporter {
         ));
 
         header.finish();
+    }
+
+    pub fn hide_project(&self, project: &workspace::Project) {
+        let header = {
+            let mut groups = self.groups.lock().unwrap();
+            groups
+                .get_mut(&project.idx())
+                .and_then(|group| group.header.take())
+        };
+        if let Some(header) = header {
+            self.reporter.children.remove(&header);
+        }
     }
 
     pub fn clear_completed(&self) {
@@ -961,12 +999,14 @@ mod tests {
     }
 
     #[test]
-    fn output_preview_strips_ansi_codes() {
+    fn output_preview_handles_sequences_split_across_chunks() {
         let mut preview = OutputPreview::default();
 
-        preview.push_chunk(b"\x1b[31mred\x1b[0m\n");
+        preview.push_chunk(b"\x1b[1;3");
+        preview.push_chunk(b"2mgreen\x1b[0m \xe7");
+        preview.push_chunk(b"\xbb\xbf\n");
 
-        assert_eq!(preview.visible_lines(), ["red"]);
+        assert_eq!(preview.visible_lines(), ["green \u{7eff}"]);
     }
 
     #[test]

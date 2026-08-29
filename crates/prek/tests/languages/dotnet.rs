@@ -1,8 +1,8 @@
-use assert_fs::fixture::{FileWriteStr, PathChild, PathCreateDir};
+use assert_fs::fixture::{FileWriteStr, PathChild};
 use prek_consts::PRE_COMMIT_HOOKS_YAML;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 
-use crate::common::{TestContext, cmd_snapshot, git_cmd};
+use crate::common::{TestEnv, cmd_snapshot};
 
 #[test]
 fn language_version() {
@@ -10,10 +10,7 @@ fn language_version() {
         return;
     }
 
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -57,15 +54,11 @@ fn language_version() {
                 pass_filenames: false
     "});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters: Vec<_> = context
-        .filters()
-        .into_iter()
-        .chain([(r"\b(\d+\.\d+)\.\d+\b", "$1.X")])
-        .collect();
+    let context = context.with_filter(r"\b(\d+\.\d+)\.\d+\b", "$1.X");
 
-    cmd_snapshot!(filters, context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -97,10 +90,7 @@ fn language_version() {
 /// Test invalid `language_version` format is rejected.
 #[test]
 fn invalid_language_version() {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -114,9 +104,9 @@ fn invalid_language_version() {
                 pass_filenames: false
     "});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: false
     exit_code: 2
     ----- stdout -----
@@ -136,10 +126,7 @@ fn multiple_sdk_versions() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -160,15 +147,11 @@ fn multiple_sdk_versions() -> anyhow::Result<()> {
                 pass_filenames: false
                 verbose: true
     "});
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters: Vec<_> = context
-        .filters()
-        .into_iter()
-        .chain([(r"\b(\d+\.\d+)\.\d+\b", "$1.X")])
-        .collect();
+    let context = context.with_filter(r"\b(\d+\.\d+)\.\d+\b", "$1.X");
 
-    cmd_snapshot!(filters, context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -219,10 +202,7 @@ fn additional_dependencies_with_version() {
         return;
     }
 
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -235,15 +215,11 @@ fn additional_dependencies_with_version() {
                 verbose: true
                 pass_filenames: false
     "#});
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters: Vec<_> = context
-        .filters()
-        .into_iter()
-        .chain([(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]")])
-        .collect();
+    let context = context.with_filter(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]");
 
-    cmd_snapshot!(filters.clone(), context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -258,7 +234,7 @@ fn additional_dependencies_with_version() {
     ");
 
     // Run again to verify the `check_health` logic.
-    cmd_snapshot!(filters, context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -280,10 +256,9 @@ fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let repo = TestContext::new();
-    repo.init_project();
-
-    let repo_path = repo.work_dir();
+    let context = TestEnv::new_git();
+    let repo = context.create_repo("dotnet-hook");
+    let repo_path = repo.path();
     repo_path
         .child(PRE_COMMIT_HOOKS_YAML)
         .write_str(indoc::indoc! {r#"
@@ -293,15 +268,9 @@ fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
           entry: dotnet-outdated --version
           additional_dependencies: ["dotnet-outdated-tool:4.7.1"]
     "#})?;
-    repo.git_add(".");
-    repo.git_commit("Add manifest");
-    git_cmd(repo.work_dir())
-        .args(["tag", "v0.1.0", "-m", "v0.1.0"])
-        .output()?;
+    repo.git().add_all().commit("Add manifest").tag("v0.1.0");
 
-    let context = TestContext::new();
-    context.init_project();
-    context.write_pre_commit_config(&indoc::formatdoc! {r"
+    let context = context.with_config(indoc::formatdoc! {r"
         repos:
           - repo: {}
             rev: v0.1.0
@@ -311,15 +280,11 @@ fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
                 pass_filenames: false
     ", repo_path.display()});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters: Vec<_> = context
-        .filters()
-        .into_iter()
-        .chain([(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]")])
-        .collect();
+    let context = context.with_filter(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]");
 
-    cmd_snapshot!(filters, context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -338,15 +303,13 @@ fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
 
 /// Ensure that stderr from hooks is captured and shown to the user.
 #[test]
-fn hook_stderr() -> anyhow::Result<()> {
+fn hook_stderr() {
     if !EnvVars.is_set(EnvVars::CI) {
-        return Ok(());
+        return;
     }
 
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -354,14 +317,10 @@ fn hook_stderr() -> anyhow::Result<()> {
                 name: local
                 language: dotnet
                 entry: dotnet run --project ./hook
-    "});
-
-    // Create a minimal console app that writes to stderr
-    context.work_dir().child("hook").create_dir_all()?;
-    context
-        .work_dir()
-        .child("hook/hook.csproj")
-        .write_str(indoc::indoc! {r#"
+    "})
+        .with_file(
+            "hook/hook.csproj",
+            indoc::indoc! {r#"
         <Project Sdk="Microsoft.NET.Sdk">
           <PropertyGroup>
             <OutputType>Exe</OutputType>
@@ -369,20 +328,21 @@ fn hook_stderr() -> anyhow::Result<()> {
             <ImplicitUsings>disable</ImplicitUsings>
           </PropertyGroup>
         </Project>
-    "#})?;
-    context
-        .work_dir()
-        .child("hook/Program.cs")
-        .write_str(indoc::indoc! {r#"
+    "#},
+        )
+        .with_file(
+            "hook/Program.cs",
+            indoc::indoc! {r#"
         using System;
         Console.Error.WriteLine("Error from hook");
         Console.Error.Flush();
         Environment.Exit(1);
-    "#})?;
+    "#},
+        );
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @"
+    cmd_snapshot!(context, context.run(), @"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -394,6 +354,4 @@ fn hook_stderr() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }

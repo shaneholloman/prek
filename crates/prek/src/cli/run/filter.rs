@@ -1,17 +1,18 @@
-use std::cell::OnceCell;
-use std::ffi::OsStr;
+use std::debug_assert_matches;
+use std::ffi::{OsStr, OsString};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use itertools::{Either, Itertools};
+use globset::Glob;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use prek_identify::{TagSet, tags_from_path};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, error, instrument};
 
-use crate::config::{FilePattern, Stage};
+use crate::config::{FilePattern, GlobPatterns, Stage};
 use crate::fs::PathClean;
 use crate::git::GIT_ROOT;
 use crate::hook::Hook;
@@ -108,10 +109,10 @@ impl<'a> HookFileFilter<'a> {
     }
 
     /// Return whether a project-owned file passes this hook's file and tag filters.
-    pub(crate) fn matches_project_file<'p>(
+    pub(crate) fn matches_project_file(
         &self,
-        file: &ProjectFile<'p>,
-        tag_cache: &FileTagCache<'p>,
+        file: &ProjectFile<'_>,
+        tag_cache: &FileTagCache,
     ) -> bool {
         self.matches_filename(file.hook_path) && self.matches_tags(file.tags(tag_cache))
     }
@@ -137,42 +138,33 @@ impl<'a> ProjectFile<'a> {
     }
 
     /// Return cached tags for the workspace-relative path.
-    pub(crate) fn tags<'cache>(
-        &self,
-        tag_cache: &'cache FileTagCache<'a>,
-    ) -> Option<&'cache TagSet> {
+    pub(crate) fn tags<'cache>(&self, tag_cache: &'cache FileTagCache) -> Option<&'cache TagSet> {
         tag_cache.tags(self.file_idx)
     }
 }
 
 #[derive(Default)]
-pub(crate) struct FileTagCache<'a> {
-    paths: &'a [PathBuf],
-    tags_by_file: Vec<OnceCell<Option<TagSet>>>,
+pub(crate) struct FileTagCache {
+    tags_by_file: Vec<Option<TagSet>>,
 }
 
-impl<'a> FileTagCache<'a> {
-    pub(crate) fn from_paths(paths: &'a [PathBuf]) -> Self {
-        let tags_by_file = (0..paths.len()).map(|_| OnceCell::new()).collect();
-        Self {
-            paths,
-            tags_by_file,
-        }
+impl FileTagCache {
+    pub(crate) fn from_paths(paths: &[PathBuf]) -> Self {
+        let tags_by_file = paths
+            .par_iter()
+            .map(|path| match tags_from_path(path) {
+                Ok(tags) => Some(tags),
+                Err(err) => {
+                    error!(filename = ?path.display(), error = %err, "Failed to get tags");
+                    None
+                }
+            })
+            .collect();
+        Self { tags_by_file }
     }
 
     pub(crate) fn tags(&self, file_idx: usize) -> Option<&TagSet> {
-        self.tags_by_file[file_idx]
-            .get_or_init(|| {
-                let path = &self.paths[file_idx];
-                match tags_from_path(path) {
-                    Ok(tags) => Some(tags),
-                    Err(err) => {
-                        error!(filename = ?path.display(), error = %err, "Failed to get tags");
-                        None
-                    }
-                }
-            })
-            .as_ref()
+        self.tags_by_file[file_idx].as_ref()
     }
 }
 
@@ -275,7 +267,7 @@ impl<'a> ProjectFiles<'a> {
     pub(crate) fn matching_filenames(
         &self,
         hook: &Hook,
-        tag_cache: &FileTagCache<'a>,
+        tag_cache: &FileTagCache,
     ) -> Vec<&'a Path> {
         let hook_filter = HookFileFilter::new(hook);
         let mut filenames = Vec::new();
@@ -288,7 +280,7 @@ impl<'a> ProjectFiles<'a> {
     }
 
     /// Return whether at least one file matches a hook without collecting every filename.
-    pub(crate) fn has_matching_file(&self, hook: &Hook, tag_cache: &FileTagCache<'a>) -> bool {
+    pub(crate) fn has_matching_file(&self, hook: &Hook, tag_cache: &FileTagCache) -> bool {
         let hook_filter = HookFileFilter::new(hook);
         for file in &self.files {
             if hook_filter.matches_project_file(file, tag_cache) {
@@ -312,7 +304,7 @@ impl<'a> ProjectPathNode<'a> {
             node = node.children.entry(component.as_os_str()).or_default();
         }
         let previous = node.project_idx.replace(project_idx);
-        debug_assert!(previous.is_none());
+        debug_assert_matches!(previous, None);
     }
 
     fn matching_projects(&self, path: &Path, matches: &mut Vec<usize>) {
@@ -343,7 +335,7 @@ impl<'a> ProjectPathNode<'a> {
 /// Project-relative views of the run input, built once and shared by hook setup and execution.
 pub(crate) struct RunFileIndex<'a> {
     projects: Vec<ProjectFiles<'a>>,
-    tag_cache: FileTagCache<'a>,
+    tag_cache: FileTagCache,
 }
 
 impl<'a> RunFileIndex<'a> {
@@ -415,26 +407,58 @@ impl<'a> RunFileIndex<'a> {
         &self.projects[project.idx()]
     }
 
-    pub(crate) fn tag_cache(&self) -> &FileTagCache<'a> {
+    pub(crate) fn tag_cache(&self) -> &FileTagCache {
         &self.tag_cache
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) enum FileSelection {
+    #[default]
+    Default,
+    All {
+        from_ref: Option<String>,
+        to_ref: Option<String>,
+    },
+    Diff {
+        from_ref: String,
+        to_ref: String,
+    },
+    Explicit {
+        files: Vec<String>,
+        globs: Vec<Glob>,
+        directories: Vec<String>,
+    },
+}
+
+impl FileSelection {
+    pub(crate) const fn requires_clean_worktree(&self) -> bool {
+        matches!(self, Self::Default | Self::Diff { .. })
+    }
+
+    pub(crate) fn refs(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Self::Diff { from_ref, to_ref } => (Some(from_ref), Some(to_ref)),
+            Self::All { from_ref, to_ref } => (from_ref.as_deref(), to_ref.as_deref()),
+            Self::Default | Self::Explicit { .. } => (None, None),
+        }
     }
 }
 
 #[derive(Default)]
 pub(crate) struct CollectOptions {
     pub(crate) input_mode: RunInputMode,
-    pub(crate) from_ref: Option<String>,
-    pub(crate) to_ref: Option<String>,
-    pub(crate) all_files: bool,
-    pub(crate) files: Vec<String>,
-    pub(crate) directories: Vec<String>,
+    pub(crate) selection: FileSelection,
     pub(crate) commit_msg_filename: Option<String>,
 }
 
 impl CollectOptions {
     pub(crate) fn all_files() -> Self {
         Self {
-            all_files: true,
+            selection: FileSelection::All {
+                from_ref: None,
+                to_ref: None,
+            },
             ..Default::default()
         }
     }
@@ -488,11 +512,7 @@ impl RunInput {
 pub(crate) async fn collect_run_input(root: &Path, opts: CollectOptions) -> Result<RunInput> {
     let CollectOptions {
         input_mode,
-        from_ref,
-        to_ref,
-        all_files,
-        files,
-        directories,
+        selection,
         commit_msg_filename,
     } = opts;
 
@@ -516,28 +536,10 @@ pub(crate) async fn collect_run_input(root: &Path, opts: CollectOptions) -> Resu
         )
     })?;
 
-    let filenames = collect_files_from_args(
-        git_root,
-        root,
-        from_ref,
-        to_ref,
-        all_files,
-        files,
-        directories,
-    )
-    .await?;
-
-    // Convert filenames to be relative to the workspace root.
-    let mut filenames = filenames
-        .into_iter()
-        .filter_map(|filename| {
-            // Only keep files under the workspace root.
-            filename
-                .strip_prefix(relative_root)
-                .map(|p| fs::normalize_path(p.to_path_buf()))
-                .ok()
-        })
-        .collect::<Vec<_>>();
+    let mut filenames = collect_files_for_selection(git_root, root, selection).await?;
+    if !relative_root.as_os_str().is_empty() {
+        filenames.retain_mut(|filename| strip_prefix_in_place(filename, relative_root));
+    }
 
     // Sort filenames if in tests to make the order consistent.
     if EnvVars.is_set(EnvVars::PREK_INTERNAL__SORT_FILENAMES) {
@@ -547,94 +549,166 @@ pub(crate) async fn collect_run_input(root: &Path, opts: CollectOptions) -> Resu
     Ok(RunInput::Files(filenames))
 }
 
+fn strip_prefix_in_place(path: &mut PathBuf, prefix: &Path) -> bool {
+    // Examples with prefix `"workspace"`:
+    // - `"other/file.rs"` does not match, so the path is unchanged.
+    // - `"workspace/file.rs"` becomes `"file.rs"` by draining `"workspace/"`.
+    // - `"workspace/file.rs/"` also becomes `"file.rs"`, because `strip_prefix`
+    //   works on components and discards the trailing separator. Since that result
+    //   is not a byte suffix of the original path, this case uses the copy below.
+    let start = {
+        let Ok(stripped) = path.strip_prefix(prefix) else {
+            return false;
+        };
+        let path_bytes = path.as_os_str().as_encoded_bytes();
+        let stripped_bytes = stripped.as_os_str().as_encoded_bytes();
+        let Some(before) = path_bytes.strip_suffix(stripped_bytes) else {
+            *path = stripped.to_path_buf();
+            return true;
+        };
+        before.len()
+    };
+    let mut bytes = std::mem::take(path).into_os_string().into_encoded_bytes();
+    drop(bytes.drain(..start));
+
+    // SAFETY: the retained suffix is the valid `Path` returned by `strip_prefix`,
+    // moved without modification and rebuilt on the same target.
+    *path = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(bytes) });
+    true
+}
+
 fn adjust_relative_path(path: &str, new_cwd: &Path) -> Result<PathBuf, std::io::Error> {
     let absolute = std::path::absolute(path)?.clean();
     fs::relative_to(absolute, new_cwd)
 }
 
-/// Collect files to run hooks on.
-/// Returns a list of file paths relative to the git root.
-async fn collect_files_from_args(
+fn warn_missing_files(files: &[String]) {
+    match files {
+        [] => {}
+        [file] => {
+            warn_user!("This file does not exist and will be ignored: `{file}`");
+        }
+        files => {
+            warn_user!(
+                "These files do not exist and will be ignored: `{}`",
+                files.join(", ")
+            );
+        }
+    }
+}
+
+fn collect_file_arguments(files: Vec<String>, git_root: &Path) -> Result<FxHashSet<PathBuf>> {
+    let mut selected = FxHashSet::default();
+    let mut missing = Vec::new();
+
+    for file in files {
+        if fs_err::exists(&file)? {
+            selected.insert(fs::normalize_path(adjust_relative_path(&file, git_root)?));
+        } else {
+            missing.push(file);
+        }
+    }
+
+    warn_missing_files(&missing);
+    Ok(selected)
+}
+
+fn git_pathspec(path: &Path) -> &Path {
+    if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    }
+}
+
+async fn collect_explicit_files(
     git_root: &Path,
-    workspace_root: &Path,
-    from_ref: Option<String>,
-    to_ref: Option<String>,
-    all_files: bool,
     files: Vec<String>,
+    globs: Vec<Glob>,
     directories: Vec<String>,
 ) -> Result<Vec<PathBuf>> {
-    if let (Some(from_ref), Some(to_ref)) = (from_ref, to_ref) {
-        let files = git::get_changed_files(&from_ref, &to_ref, workspace_root).await?;
-        debug!(
-            "Files changed between {} and {}: {}",
-            from_ref,
-            to_ref,
-            files.len()
-        );
-        return Ok(files);
+    let mut selected = collect_file_arguments(files, git_root)?;
+    let patterns = GlobPatterns::from_globs(globs)?;
+    let cwd_relative = if patterns.is_empty() {
+        PathBuf::new()
+    } else {
+        fs::normalize_path(adjust_relative_path(".", git_root)?)
+    };
+    let directories = directories
+        .into_iter()
+        .map(|directory| adjust_relative_path(&directory, git_root).map(fs::normalize_path))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut pathspecs = directories
+        .iter()
+        .map(|directory| git_pathspec(directory))
+        .collect::<Vec<_>>();
+    if !patterns.is_empty() {
+        pathspecs.push(git_pathspec(&cwd_relative));
     }
 
-    if !files.is_empty() || !directories.is_empty() {
-        // By default, `pre-commit` add `types: [file]` for all hooks,
-        // so `pre-commit` will ignore user provided directories.
-        // We do the same here for compatibility.
-        // For `types: [directory]`, `pre-commit` passes the directory names to the hook directly.
-        let (exists, non_exists): (FxHashSet<_>, Vec<_>) =
-            files.into_iter().partition_map(|filename| {
-                if fs_err::exists(&filename).unwrap_or(false) {
-                    Either::Left(filename)
-                } else {
-                    Either::Right(filename)
-                }
-            });
-        if !non_exists.is_empty() {
-            if non_exists.len() == 1 {
-                warn_user!(
-                    "This file does not exist and will be ignored: `{}`",
-                    non_exists[0]
-                );
-            } else {
-                warn_user!(
-                    "These files do not exist and will be ignored: `{}`",
-                    non_exists.join(", ")
-                );
+    if !pathspecs.is_empty() {
+        for file in git::ls_files(git_root, pathspecs).await? {
+            let file = fs::normalize_path(file);
+            let matches_directory = directories
+                .iter()
+                .any(|directory| directory.as_os_str().is_empty() || file.starts_with(directory));
+            let matches_glob = !matches_directory
+                && !patterns.is_empty()
+                && file
+                    .strip_prefix(&cwd_relative)
+                    .is_ok_and(|relative| patterns.is_match(relative));
+
+            if matches_directory || matches_glob {
+                selected.insert(file);
             }
         }
+    }
 
-        let mut exists = exists
-            .into_iter()
-            .map(|filename| adjust_relative_path(&filename, git_root).map(fs::normalize_path))
-            .collect::<Result<FxHashSet<_>, _>>()?;
+    debug!("Files passed as arguments: {}", selected.len());
+    Ok(selected.into_iter().collect())
+}
 
-        for dir in directories {
-            let dir = adjust_relative_path(&dir, git_root)?;
-            let dir_files = git::ls_files(git_root, &dir).await?;
-            for file in dir_files {
-                let file = fs::normalize_path(file);
-                exists.insert(file);
-            }
+/// Collect files to run hooks on.
+/// Returns a list of file paths relative to the git root.
+async fn collect_files_for_selection(
+    git_root: &Path,
+    workspace_root: &Path,
+    selection: FileSelection,
+) -> Result<Vec<PathBuf>> {
+    match selection {
+        FileSelection::Diff { from_ref, to_ref } => {
+            let files = git::changed_files(&from_ref, &to_ref, workspace_root).await?;
+            debug!(
+                "Files changed between {} and {}: {}",
+                from_ref,
+                to_ref,
+                files.len()
+            );
+            Ok(files)
         }
+        FileSelection::Explicit {
+            files,
+            globs,
+            directories,
+        } => collect_explicit_files(git_root, files, globs, directories).await,
+        FileSelection::All { .. } => {
+            let files = git::ls_files(git_root, [workspace_root]).await?;
+            debug!("All files in the workspace: {}", files.len());
+            Ok(files)
+        }
+        FileSelection::Default => {
+            if git::is_in_merge_conflict().await? {
+                let files = git::conflicted_files(workspace_root).await?;
+                debug!("Conflicted files: {}", files.len());
+                return Ok(files);
+            }
 
-        debug!("Files passed as arguments: {}", exists.len());
-        return Ok(exists.into_iter().collect());
+            let files = git::staged_files(workspace_root).await?;
+            debug!("Staged files: {}", files.len());
+            Ok(files)
+        }
     }
-
-    if all_files {
-        let files = git::ls_files(git_root, workspace_root).await?;
-        debug!("All files in the workspace: {}", files.len());
-        return Ok(files);
-    }
-
-    if git::is_in_merge_conflict().await? {
-        let files = git::get_conflicted_files(workspace_root).await?;
-        debug!("Conflicted files: {}", files.len());
-        return Ok(files);
-    }
-
-    let files = git::get_staged_files(workspace_root).await?;
-    debug!("Staged files: {}", files.len());
-
-    Ok(files)
 }
 
 pub(super) const fn stage_uses_message_file_input(stage: Stage) -> bool {
@@ -644,7 +718,52 @@ pub(super) const fn stage_uses_message_file_input(stage: Stage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::FileSelectionArgs;
     use crate::config::GlobPatterns;
+
+    #[test]
+    fn all_file_selection_preserves_partial_refs() {
+        let selection: FileSelection = FileSelectionArgs {
+            all_files: true,
+            to_ref: Some("local-sha".to_string()),
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(selection.refs(), (None, Some("local-sha")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strip_prefix_in_place_preserves_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let mut filename = PathBuf::from(OsStr::from_bytes(b"workspace/bad-\xff.py"));
+
+        let stripped = strip_prefix_in_place(&mut filename, Path::new("workspace"));
+
+        assert_eq!(
+            (stripped, filename),
+            (true, PathBuf::from(OsStr::from_bytes(b"bad-\xff.py")))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_prefix_in_place_preserves_non_utf8_names() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let mut filename = OsString::from(r"workspace\");
+        filename.push(OsString::from_wide(&[0xD800]));
+        let mut filename = PathBuf::from(filename);
+
+        let stripped = strip_prefix_in_place(&mut filename, Path::new("workspace"));
+
+        assert_eq!(
+            (stripped, filename),
+            (true, PathBuf::from(OsString::from_wide(&[0xD800])))
+        );
+    }
 
     fn glob_pattern(pattern: &str) -> FilePattern {
         FilePattern::Glob(GlobPatterns::new(vec![pattern.to_string()]).unwrap())
@@ -697,15 +816,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn filename_filter_skips_non_utf8_paths_with_regex_include() {
+    fn filename_filter_regex_matches_valid_suffix_of_non_utf8_path() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt as _;
 
-        let include = regex_pattern(r".*\.py$");
+        let include = regex_pattern(r"\.py$");
         let path = Path::new(OsStr::from_bytes(b"bad-\xff.py"));
         let filter = FilenameFilter::new(Some(&include), None);
 
-        assert!(!filter.matches(path));
+        assert!(filter.matches(path));
+    }
+
+    #[test]
+    fn filename_filter_regex_keeps_unicode_character_classes() {
+        let include = regex_pattern(r"^\w+\.py$");
+        let filter = FilenameFilter::new(Some(&include), None);
+
+        assert!(filter.matches(Path::new("café.py")));
     }
 
     #[test]

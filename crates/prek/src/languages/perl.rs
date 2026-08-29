@@ -1,6 +1,5 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,11 +8,9 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::Store;
 
 #[derive(Debug, Copy, Clone)]
@@ -25,6 +22,7 @@ impl LanguageBackend for Perl {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -37,9 +35,9 @@ impl LanguageBackend for Perl {
             "Failed to locate cpan executable. Is cpan installed and available in PATH?",
         )?;
 
-        if let Some(repo_path) = hook.repo_path() {
+        if hook.repo_path().is_some() {
             Cmd::new(&cpan)
-                .current_dir(repo_path)
+                .current_dir(install_cwd)
                 .arg("-T")
                 .arg(".")
                 .args(&hook.additional_dependencies)
@@ -50,6 +48,7 @@ impl LanguageBackend for Perl {
                 .context("Failed to install Perl dependencies")?;
         } else if !hook.additional_dependencies.is_empty() {
             Cmd::new(&cpan)
+                .current_dir(install_cwd)
                 .arg("-T")
                 .args(&hook.additional_dependencies)
                 .envs(perl_env(&info.env_path)?)
@@ -73,53 +72,17 @@ impl LanguageBackend for Perl {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Perl must have env path");
         let new_path = prepend_paths(&[&bin_dir(env_dir)]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .envs(perl_env(env_dir)?)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment.set_path(&new_path).envs(perl_env(env_dir)?);
+        Ok(environment)
     }
 }
 

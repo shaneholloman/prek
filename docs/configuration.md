@@ -12,7 +12,24 @@ Both formats are first-class and will be supported long-term. They describe the 
     ```toml
     [[repos]]
     repo = "https://github.com/pre-commit/pre-commit-hooks"
-    hooks = [{ id = "trailing-whitespace" }]
+    rev = "v6.0.0"
+    hooks = [
+      { id = "trailing-whitespace" },
+      { id = "check-toml" },
+    ]
+
+    [[repos]]
+    repo = "local"
+    hooks = [
+      {
+        id = "cargo-fmt",
+        name = "cargo fmt",
+        language = "system",
+        entry = "cargo fmt --",
+        types = ["rust"],
+        pass_filenames = false,
+      },
+    ]
     ```
 
 === ".pre-commit-config.yaml"
@@ -20,19 +37,24 @@ Both formats are first-class and will be supported long-term. They describe the 
     ```yaml
     repos:
       - repo: https://github.com/pre-commit/pre-commit-hooks
+        rev: v6.0.0
         hooks:
           - id: trailing-whitespace
+          - id: check-toml
+
+      - repo: local
+        hooks:
+          - id: cargo-fmt
+            name: cargo fmt
+            language: system
+            entry: cargo fmt --
+            types: [rust]
+            pass_filenames: false
     ```
 
-## Global configuration
-
-`prek` also reads an optional user-level global config from the platform config directory:
-
-- Linux and macOS: `~/.config/prek/prek.toml` (or `$XDG_CONFIG_HOME/prek/prek.toml` when `XDG_CONFIG_HOME` is set)
-- Windows: `%APPDATA%\prek\prek.toml`
-
-This file is for user-level `prek` settings, not hook definitions. Project hooks still live in the project config files described below.
-For the supported global settings, see the [configuration reference](reference/configuration.md#global-config-file).
+For hooks defined directly in your project configuration, see
+[Local Hooks](local-hooks.md). The rest of this page explains config discovery,
+file formats, filters, and validation.
 
 ## Pre-commit compatibility
 
@@ -55,6 +77,7 @@ They work in both YAML and TOML, but they only matter for compatibility if you s
     - [`priorities`](reference/configuration.md#priorities)
     - [`minimum_prek_version`](reference/configuration.md#prek-only-minimum-prek-version-config)
     - [`orphan`](reference/configuration.md#prek-only-orphan)
+    - [`files` and `exclude` glob mappings](reference/configuration.md#top-level-files)
 - Repo type:
     - [`repo: builtin`](reference/configuration.md#prek-only-repo-builtin)
 - Hook-level:
@@ -62,6 +85,10 @@ They work in both YAML and TOML, but they only matter for compatibility if you s
     - [`shell`](reference/configuration.md#shell)
     - [`priority`](reference/configuration.md#prek-only-priority)
     - [`minimum_prek_version`](reference/configuration.md#prek-only-minimum-prek-version-hook)
+    - [`groups`](reference/configuration.md#groups)
+    - [A positive integer for `pass_filenames`](reference/configuration.md#pass_filenames)
+    - [An options map for `language_version`](reference/configuration.md#language_version)
+    - [`files` and `exclude` glob mappings](reference/configuration.md#files-exclude)
 
 ## Configuration file
 
@@ -190,7 +217,7 @@ You may want to use the longer form if your editor/IDE complains about it.
 Practical notes:
 
 - Regular expressions are provided as YAML strings.
-  If your regex contains backslashes, quote it (e.g. `files: '\\.rs$'`).
+  If your regex contains backslashes, quote it (e.g. `files: '\.rs$'`).
 - YAML anchors/aliases and merge keys are supported, so you can de-duplicate repeated blocks.
 
 Example:
@@ -232,6 +259,18 @@ Example:
 
     If you want to switch, you can use [`prek util yaml-to-toml`](reference/cli.md#prek-util-yaml-to-toml) to convert YAML configs to `prek.toml`.
     YAML comments are not preserved during conversion.
+
+### Global configuration
+
+`prek` also reads an optional user-level global config from the platform config directory:
+
+- Linux and macOS: `~/.config/prek/prek.toml` (or `$XDG_CONFIG_HOME/prek/prek.toml` when `XDG_CONFIG_HOME` is set)
+- Windows: `%APPDATA%\prek\prek.toml`
+
+This file is for user-level prek settings, not hook definitions. Project hooks
+still live in the project config files described above. For the supported
+global settings, see the
+[configuration reference](reference/configuration.md#global-config-file).
 
 ### Scope (per-project)
 
@@ -285,5 +324,8 @@ Use [`prek validate-config`](reference/cli.md#prek-validate-config) to validate 
 If you want IDE completion / validation, prek publishes a JSON Schema through the [JSON Schema Store](https://www.schemastore.org/prek.json), so some editors may pick it up automatically.
 
 That schema tracks what `prek` accepts today, but `prek` also intentionally tolerates unknown keys for forward compatibility.
+
+Hook authors can opt into the separate schema for `.pre-commit-hooks.yaml` described in
+[Editor completion and validation](authoring-hooks.md#editor-completion-and-validation).
 
 For every accepted configuration key and hook option, see the [Configuration Reference](reference/configuration.md). For process environment controls, see the [Environment Variable Reference](reference/environment-variables.md).

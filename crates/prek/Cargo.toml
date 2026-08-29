@@ -29,6 +29,7 @@ prek-identify = { workspace = true, features = ["serde"] }
 aho-corasick = { workspace = true }
 annotate-snippets = { workspace = true }
 anstream = { workspace = true }
+anstyle-parse = { workspace = true }
 anstyle-query = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -55,15 +56,17 @@ indoc = { workspace = true }
 itertools = { workspace = true }
 json5 = { workspace = true }
 globset = { workspace = true }
+granit-parser = { workspace = true }
 # Enable static linking for liblzma
 # This is required for the `xz` feature in `async-compression`
 liblzma = { workspace = true }
-mea = { workspace = true }
+asyncband = { workspace = true }
 memchr = { workspace = true }
 owo-colors = { workspace = true }
 regex = { workspace = true }
 regex-automata = { workspace = true }
 reqwest = { workspace = true }
+rayon = { workspace = true }
 aws-lc-rs = { workspace = true }
 rustc-hash = { workspace = true }
 same-file = { workspace = true }
@@ -76,6 +79,7 @@ serde_stacker = { workspace = true }
 serde-saphyr = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
+ssl-certs = { workspace = true }
 strum = { workspace = true }
 target-lexicon = { workspace = true }
 tempfile = { workspace = true }
@@ -88,6 +92,7 @@ toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 unicode-width = { workspace = true }
+url = { workspace = true }
 walkdir = { workspace = true }
 webpki-root-certs = { workspace = true }
 which = { workspace = true }

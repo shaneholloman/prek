@@ -1,6 +1,5 @@
 use std::io::ErrorKind;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,11 +8,9 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::{CacheBucket, Store};
 
 const PRE_COMMIT_CHANNEL_DIR: &str = ".pre-commit-channel";
@@ -57,6 +54,7 @@ impl LanguageBackend for Coursier {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -85,7 +83,7 @@ impl LanguageBackend for Coursier {
                 has_channel_apps = true;
                 for app in channel_apps {
                     Cmd::new(&cs)
-                        .current_dir(repo_path)
+                        .current_dir(install_cwd)
                         .arg("install")
                         .arg("--dir")
                         .arg(&info.env_path)
@@ -106,28 +104,24 @@ impl LanguageBackend for Coursier {
         if !dependencies.is_empty() {
             let mut fetch_cmd = Cmd::new(&cs);
             fetch_cmd
+                .current_dir(install_cwd)
                 .arg("fetch")
                 .args(dependencies)
                 .env(EnvVars::PATH, &path_env)
                 .env(EnvVars::COURSIER_CACHE, &coursier_cache);
-            if let Some(repo_path) = hook.repo_path() {
-                fetch_cmd.current_dir(repo_path);
-            }
             fetch_cmd.check(true).output().await.with_context(|| {
                 format!("Failed to fetch coursier app `{}`", dependencies.join(" "))
             })?;
 
             let mut install_cmd = Cmd::new(&cs);
             install_cmd
+                .current_dir(install_cwd)
                 .arg("install")
                 .arg("--dir")
                 .arg(&info.env_path)
                 .args(dependencies)
                 .env(EnvVars::PATH, path_env)
                 .env(EnvVars::COURSIER_CACHE, &coursier_cache);
-            if let Some(repo_path) = hook.repo_path() {
-                install_cmd.current_dir(repo_path);
-            }
             install_cmd.check(true).output().await.with_context(|| {
                 format!(
                     "Failed to install coursier app `{}`",
@@ -153,54 +147,20 @@ impl LanguageBackend for Coursier {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
         store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_path = hook.env_path().expect("Coursier must have env path");
-        let coursier_cache = store.cache_path(CacheBucket::Coursier);
         let path_env = prepend_paths(&[env_path]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&path_env), store)?;
+        let coursier_cache = store.cache_path(CacheBucket::Coursier);
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .env(EnvVars::PATH, &path_env)
-                .env(EnvVars::COURSIER_CACHE, &coursier_cache)
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&path_env)
+            .env(EnvVars::COURSIER_CACHE, &coursier_cache);
+        Ok(environment)
     }
 }
 

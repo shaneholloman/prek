@@ -1,15 +1,11 @@
-use assert_fs::fixture::{FileWriteStr, PathChild};
 use prek_consts::env_vars::EnvVars;
 
-use crate::common::{TestContext, cmd_snapshot};
+use crate::common::{TestEnv, cmd_snapshot};
 
 #[test]
-fn local_hook() -> anyhow::Result<()> {
-    let context = TestContext::new();
-
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+fn local_hook() {
+    let context = TestEnv::new_git()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -20,12 +16,10 @@ fn local_hook() -> anyhow::Result<()> {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "});
-
-    context
-        .work_dir()
-        .child("hello.cabal")
-        .write_str(indoc::indoc! {r"
+    "})
+        .with_file(
+            "hello.cabal",
+            indoc::indoc! {r"
             cabal-version:       3.0
             name:                hello
             version:             0.1.0.0
@@ -35,20 +29,20 @@ fn local_hook() -> anyhow::Result<()> {
               main-is:             Main.hs
               default-language:    GHC2021
               build-depends:       base >= 4.19 && < 5
-        "})?;
-
-    context
-        .work_dir()
-        .child("Main.hs")
-        .write_str(indoc::indoc! {r#"
+        "},
+        )
+        .with_file(
+            "Main.hs",
+            indoc::indoc! {r#"
             module Main where
             main :: IO ()
             main = putStrLn "Hello Haskell!"
-        "#})?;
+        "#},
+        );
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -62,7 +56,7 @@ fn local_hook() -> anyhow::Result<()> {
     ");
 
     // Run again to check `health_check` works correctly.
-    cmd_snapshot!(context.filters(), context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -74,17 +68,11 @@ fn local_hook() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }
 
 #[test]
 fn additional_dependencies() {
-    let context = TestContext::new();
-
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -98,11 +86,9 @@ fn additional_dependencies() {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters = context.filters();
-
-    cmd_snapshot!(filters, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -118,13 +104,9 @@ fn additional_dependencies() {
 
 #[test]
 fn remote_hook() {
-    let context = TestContext::new();
-
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
-          - repo: https://github.com/prek-test-repos/haskell-hooks
+          - repo: https://github.com/prek-ci/haskell-hooks
             rev: v1.0.0
             hooks:
               - id: hello
@@ -132,11 +114,9 @@ fn remote_hook() {
                 verbose: true
     "});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters = context.filters();
-
-    cmd_snapshot!(filters, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_INTERNAL__SKIP_CABAL_UPDATE, "1"), @"
     success: true
     exit_code: 0
     ----- stdout -----

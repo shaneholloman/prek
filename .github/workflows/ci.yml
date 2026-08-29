@@ -15,10 +15,12 @@ permissions: {}
 env:
   # UV_VERSION should not greater than MAX_UV_VERSION in `languages/python/uv`.
   # Otherwise, tests jobs will install their own uv, and it will encounter concurrency issue.
-  UV_VERSION: "0.11.26"
+  UV_VERSION: "0.12.5"
   NODE_VERSION: "20"
   BUN_VERSION: "1.3"
   GO_VERSION: "1.24"
+  # The mise tests install 2026.7.18 separately to cover managed downloads.
+  MISE_VERSION: "2026.8.3"
   PYTHON_VERSION: "3.12"
   PHP_VERSION: "8.4"
   RUBY_VERSION: "3.4"
@@ -49,10 +51,11 @@ jobs:
       run-bench: ${{ steps.plan.outputs.run_bench }}
       run-zizmor: ${{ steps.plan.outputs.run_zizmor }}
       check-docs: ${{ steps.plan.outputs.check_docs }}
+      publish-dev-docs: ${{ steps.plan.outputs.publish_dev_docs }}
       build-release-binaries: ${{ steps.plan.outputs.build_release_binaries }}
       build-docker: ${{ steps.plan.outputs.build_docker }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -67,7 +70,7 @@ jobs:
           HAS_BUILD_SKIP_DOCKER_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'build:skip-docker') }}
           HAS_BUILD_SKIP_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'build:skip-release') }}
           HAS_BUILD_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'build:release') }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           [[ "$GH_REF" == "refs/heads/master" ]] && on_master_branch=1
           [[ "$HAS_SKIP_LABEL" == "true" ]] && has_skip_label=1
@@ -82,8 +85,8 @@ jobs:
             [[ "$file" == "Cargo.toml" || "$file" == "Cargo.lock" || "$file" =~ ^crates/.*/Cargo\.toml$ ]] && rust_deps_changed=1
             [[ "$file" == "rust-toolchain.toml" || "$file" =~ ^\.cargo/ ]] && rust_config_changed=1
             [[ "$file" == "pyproject.toml" ]] && pyproject_changed=1
-            [[ "$file" == "docs/reference/cli.md" || "$file" == "docs/reference/configuration.md" || "$file" == "prek.schema.json" ]] && generated_from_code_changed=1
-            [[ "$file" =~ ^docs/ || "$file" == "mkdocs.yml" || "$file" == "pyproject.toml" || "$file" == "uv.lock" ]] && docs_related_changed=1
+            [[ "$file" == "docs/reference/cli.md" || "$file" == "docs/reference/configuration.md" || "$file" == "prek.schema.json" || "$file" == "prek-hooks.schema.json" ]] && generated_from_code_changed=1
+            [[ "$file" =~ ^docs/ || "$file" == "mkdocs.yml" || "$file" == "pyproject.toml" || "$file" == "uv.lock" || "$file" == ".github/workflows/publish-docs.yml" ]] && docs_related_changed=1
             [[ "$file" =~ ^\.github/workflows/.*\.ya?ml$ ]] && workflow_changed=1
             [[ "$file" == ".github/workflows/ci.yml" ]] && ci_workflow_changed=1
             [[ "$file" == ".github/workflows/build-release-binaries.yml" ]] && release_binaries_workflow_changed=1
@@ -108,8 +111,9 @@ jobs:
           [[ ! $has_skip_label && ($any_rust_changed || $bench_related_changed || $on_master_branch) ]] && run_bench=1
           [[ ! $has_skip_label && ($workflow_changed || $zizmor_config_changed || $on_master_branch) ]] && run_zizmor=1
           [[ ! $has_skip_label && ($docs_related_changed || $on_master_branch) ]] && check_docs=1
-          [[ ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_release_label && ($release_build_changed || $has_build_release_label) ]] && build_release_binaries=1
-          [[ ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_docker_label && $docker_build_changed ]] && build_docker=1
+          [[ $on_master_branch && $docs_related_changed ]] && publish_dev_docs=1
+          [[ ! $on_master_branch && ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_release_label && ($release_build_changed || $has_build_release_label) ]] && build_release_binaries=1
+          [[ ! $on_master_branch && ! $has_skip_label && ! $has_build_skip_label && ! $has_build_skip_docker_label && $docker_build_changed ]] && build_docker=1
 
           out() { [[ "$2" ]] && echo "$1=true" || echo "$1=false"; }
           {
@@ -118,6 +122,7 @@ jobs:
             out run_bench              "$run_bench"
             out run_zizmor             "$run_zizmor"
             out check_docs             "$check_docs"
+            out publish_dev_docs       "$publish_dev_docs"
             out build_release_binaries "$build_release_binaries"
             out build_docker           "$build_docker"
           } >> "${GITHUB_OUTPUT}"
@@ -132,7 +137,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: "Install Rustfmt"
@@ -140,7 +145,7 @@ jobs:
       - name: "rustfmt"
         run: cargo fmt --all --check
       - name: Run prek checks
-        uses: j178/prek-action@e98a699c41eb69ab013a45817a0406469a748f8d # v2.0.5
+        uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
         env:
           PREK_SKIP: cargo-fmt,cargo-clippy
 
@@ -151,13 +156,13 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install dist
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
 
       - name: Run dist plan
         run: |
@@ -175,12 +180,12 @@ jobs:
       security-events: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
 
   check-docs:
     needs: plan
@@ -188,11 +193,11 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -200,6 +205,19 @@ jobs:
         run: |
           uv run --group docs zensical build
           uv run --group docs llmstxt-standalone build
+
+  publish-dev-docs:
+    needs:
+      - plan
+      - check-docs
+    if: ${{ needs.plan.outputs.publish-dev-docs == 'true' }}
+    permissions:
+      contents: write
+      id-token: write
+      pages: write
+    uses: ./.github/workflows/publish-docs.yml
+    with:
+      plan: ""
 
   build-release-binaries:
     needs: plan
@@ -229,11 +247,14 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: "Install mold"
+        run: ./scripts/install-mold.sh
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
 
@@ -249,19 +270,19 @@ jobs:
     timeout-minutes: 15
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Create Dev Drive
-        run: ${{ github.workspace }}/.github/scripts/setup-dev-drive.ps1
+        run: ${{ github.workspace }}/scripts/setup-dev-drive.ps1
 
       # actions/checkout does not let us clone into anywhere outside ${{ github.workspace }}, so we have to copy the clone...
       - name: Copy Git Repo to Dev Drive
         run: |
           Copy-Item -Path "${{ github.workspace }}" -Destination "$Env:PREK_WORKSPACE" -Recurse
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ env.PREK_WORKSPACE }}
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
@@ -280,11 +301,11 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: "Install cargo shear"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -292,15 +313,18 @@ jobs:
   cargo-test-without-uv:
     needs: plan
     if: ${{ needs.plan.outputs.test-code == 'true' }}
-    timeout-minutes: 5
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     name: "cargo test | without uv"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: "Install mold"
+        run: ./scripts/install-mold.sh
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
 
@@ -308,12 +332,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-llvm-cov
 
@@ -322,7 +346,7 @@ jobs:
           echo "::group::Test install uv with auto select"
           cargo llvm-cov nextest \
             --profile ci-core \
-            --cargo-profile fast-build \
+            --cargo-profile no-debug \
             --no-report \
             -E 'binary_id(prek::run) and test(run_basic)'
           echo "::endgroup::"
@@ -332,13 +356,13 @@ jobs:
             export PREK_UV_SOURCE=$source
             cargo llvm-cov nextest \
               --profile ci-core \
-              --cargo-profile fast-build \
+              --cargo-profile no-debug \
               --no-report \
               -E 'binary_id(prek::run) and test(run_basic)'
             echo "::endgroup::"
           done
 
-          cargo llvm-cov report --profile fast-build --lcov --output-path lcov.info
+          cargo llvm-cov report --profile no-debug --lcov --output-path lcov.info
 
       - name: "Upload coverage reports to Codecov"
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
@@ -359,12 +383,15 @@ jobs:
           - ubuntu-latest
           - macos-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - name: "Install mold"
         if: ${{ matrix.os == 'ubuntu-latest' }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        run: ./scripts/install-mold.sh
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
           # Workaround for https://github.com/Swatinem/rust-cache/issues/341
@@ -374,22 +401,22 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-llvm-cov
 
       - name: "Install uv"
-        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
 
       - name: "Install Python"
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -401,7 +428,7 @@ jobs:
             --lcov \
             --output-path lcov.info \
             --workspace \
-            --cargo-profile fast-build \
+            --cargo-profile no-debug \
             --profile ci-core \
             --features schemars \
             -E "${CI_CORE_FILTER}"
@@ -419,19 +446,19 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Create Dev Drive
-        run: ${{ github.workspace }}/.github/scripts/setup-dev-drive.ps1
+        run: ${{ github.workspace }}/scripts/setup-dev-drive.ps1
 
       # actions/checkout does not let us clone into anywhere outside ${{ github.workspace }}, so we have to copy the clone...
       - name: Copy Git Repo to Dev Drive
         run: |
           Copy-Item -Path "${{ github.workspace }}" -Destination "$Env:PREK_WORKSPACE" -Recurse
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ env.PREK_WORKSPACE }}
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
@@ -440,23 +467,23 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-llvm-cov
 
       - name: "Install uv"
-        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           cache-local-path: ${{ env.DEV_DRIVE }}/uv-cache
 
       - name: "Install Python"
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -473,7 +500,7 @@ jobs:
             --lcov `
             --output-path lcov.info `
             --workspace `
-            --cargo-profile fast-build `
+            --cargo-profile no-debug `
             --features schemars `
             --profile ci-core `
             -E $env:CI_CORE_FILTER
@@ -496,14 +523,15 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.language-test-matrix) }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+      - name: "Install mold"
+        run: ./scripts/install-mold.sh
         if: ${{ matrix.os == 'ubuntu-latest' }}
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
           # Workaround for https://github.com/Swatinem/rust-cache/issues/341
@@ -513,12 +541,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-llvm-cov
 
@@ -526,23 +554,23 @@ jobs:
       - name: "Setup MSVC"
         if: ${{ matrix.os == 'windows-latest' && contains(format(' {0} ', matrix.languages), ' lua ') }}
         shell: pwsh
-        run: ./.github/scripts/setup-msvc.ps1
+        run: ./scripts/setup-msvc.ps1
 
       - name: "Install uv"
         if: ${{ contains(format(' {0} ', matrix.languages), ' python ') }}
-        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
 
       - name: "Install Python"
         if: ${{ contains(format(' {0} ', matrix.languages), ' python ') }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: "Install Node.js"
         if: ${{ contains(format(' {0} ', matrix.languages), ' node ') }}
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -551,11 +579,22 @@ jobs:
 
       - name: "Install Go"
         if: ${{ contains(format(' {0} ', matrix.languages), ' golang ') }}
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           # Dummy dependency path to satisfy required input while enabling caching
           cache-dependency-path: LICENSE
+
+      - name: "Install mise"
+        if: ${{ contains(format(' {0} ', matrix.languages), ' mise ') }}
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install: false
+          cache: false
+          env: false
+          add_shims_to_path: false
+          working_directory: ${{ runner.temp }}
 
       - name: "Install Lua"
         if: ${{ contains(format(' {0} ', matrix.languages), ' lua ') }}
@@ -571,7 +610,7 @@ jobs:
 
       - name: "Install Ruby"
         if: ${{ contains(format(' {0} ', matrix.languages), ' ruby ') }}
-        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1.316.0
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
 
@@ -591,14 +630,14 @@ jobs:
 
       - name: "Install Micromamba"
         if: ${{ contains(format(' {0} ', matrix.languages), ' conda ') }}
-        uses: mamba-org/setup-micromamba@d7c9bd84e824b79d2af72a2d4196c7f4300d3476 # v3.0.0
+        uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3.2.1
         with:
           init-shell: none
           generate-run-shell: false
 
       - name: "Install Coursier"
         if: ${{ contains(format(' {0} ', matrix.languages), ' coursier ') }}
-        uses: coursier/setup-action@fd1707a76b027efdfb66ca79318b4d29b72e5a02 # v3.0.0
+        uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
         with:
           apps: ""
 
@@ -610,13 +649,13 @@ jobs:
 
       - name: "Install Dart"
         if: ${{ contains(format(' {0} ', matrix.languages), ' dart ') }}
-        uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        uses: dart-lang/setup-dart@7654d458321ee25acccccfdb86cd48bd95768ff1 # v1.8.0
         with:
           sdk: ${{ env.DART_VERSION }}
 
       - name: "Install GHC and Cabal"
         if: ${{ contains(format(' {0} ', matrix.languages), ' haskell ') }}
-        uses: haskell-actions/setup@cd0d9bdd65b20557f41bea4dbe43d0b5fbbfe553 # v2.11.0
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d # v2.12.0
         with:
           ghc-version: ${{ env.GHC_VERSION }}
           cabal-version: ${{ env.CABAL_VERSION }}
@@ -629,7 +668,7 @@ jobs:
 
       - name: "Install .NET"
         if: ${{ contains(format(' {0} ', matrix.languages), ' dotnet ') }}
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -659,7 +698,7 @@ jobs:
             --lcov \
             --output-path lcov.info \
             --workspace \
-            --cargo-profile fast-build \
+            --cargo-profile no-debug \
             --features schemars \
             --profile ci-language \
             -E "$NEXTEST_FILTER"
@@ -679,7 +718,7 @@ jobs:
             --lcov `
             --output-path lcov.info `
             --workspace `
-            --cargo-profile fast-build `
+            --cargo-profile no-debug `
             --features schemars `
             --profile ci-language `
             -E $env:NEXTEST_FILTER
@@ -706,12 +745,12 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Checkout python/cpython
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: python/cpython
           ref: f3759d21dd5e6510361d7409a1df53f35ebd9a58
@@ -719,7 +758,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ needs.plan.outputs.save-rust-cache == 'true' }}
 
@@ -742,6 +781,7 @@ jobs:
       - check-release
       - check-zizmor
       - check-docs
+      - publish-dev-docs
       - cargo-clippy-linux
       - cargo-clippy-windows
       - cargo-shear

@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,14 +7,11 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
 use crate::languages::deno::DenoRequest;
 use crate::languages::deno::installer::{DenoInstaller, DenoResult, bin_dir};
-use crate::languages::version::LanguageRequest;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::{CacheBucket, Store, ToolBucket};
 
 fn is_valid_install_name(name: &str) -> bool {
@@ -62,6 +58,7 @@ impl LanguageBackend for Deno {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -70,13 +67,13 @@ impl LanguageBackend for Deno {
         let deno_dir = store.tools_path(ToolBucket::Deno);
         let installer = DenoInstaller::new(deno_dir);
 
-        let (deno_request, allows_download) = match &hook.language_request {
-            LanguageRequest::Any { system_only } => (&DenoRequest::Any, !system_only),
-            LanguageRequest::Deno(deno_request) => (deno_request, true),
-            _ => unreachable!(),
-        };
+        let deno_request: &DenoRequest = hook.language_request.version();
         let deno = installer
-            .install(store, deno_request, allows_download)
+            .install(
+                store,
+                deno_request,
+                hook.language_request.toolchain_policy(),
+            )
             .await
             .context("Failed to install deno")?;
 
@@ -88,12 +85,6 @@ impl LanguageBackend for Deno {
         // 2. Create env
         let env_bin_dir = bin_dir(&info.env_path);
         fs_err::tokio::create_dir_all(&env_bin_dir).await?;
-
-        // Relative install targets in `additional_dependencies` are resolved by Deno
-        // against the process working directory. For remote hooks that should be the
-        // cloned hook repository so `./cli.ts:name` refers to files shipped by the hook.
-        // For local hooks we keep resolution in the user's work tree.
-        let install_dir = hook.repo_path().unwrap_or(hook.work_dir());
 
         // We share one Deno cache bucket across install and run. Executable shims live in
         // the per-hook env bin dir, while downloaded modules and npm artifacts are reused
@@ -126,7 +117,7 @@ impl LanguageBackend for Deno {
 
             let mut install_cmd = Cmd::new(deno.deno());
             install_cmd
-                .current_dir(install_dir)
+                .current_dir(install_cwd)
                 .env(EnvVars::DENO_DIR, &deno_cache_dir)
                 .env(EnvVars::DENO_NO_UPDATE_CHECK, "1")
                 .arg("install")
@@ -174,61 +165,23 @@ impl LanguageBackend for Deno {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
         store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let deno_cache_dir = store.cache_path(CacheBucket::Deno);
         let info = hook.install_info().expect("Deno must be installed");
-        let env_dir = &info.env_path;
         let deno_bin_dir = hook.toolchain_dir().expect("Deno must have toolchain dir");
-        let new_path =
-            prepend_paths(&[&bin_dir(env_dir), deno_bin_dir]).context("Failed to join PATH")?;
+        let new_path = prepend_paths(&[&bin_dir(&info.env_path), deno_bin_dir])
+            .context("Failed to join PATH")?;
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-
-        let run = async |batch: &[&Path]| {
-            let mut cmd = Cmd::new(&entry[0]);
-            let mut output = cmd
-                .current_dir(hook.work_dir())
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::DENO_DIR, &deno_cache_dir)
-                .env(EnvVars::DENO_NO_UPDATE_CHECK, "1")
-                .envs(&hook.env)
-                .args(&entry[1..])
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        // Collect results
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::DENO_DIR, &deno_cache_dir)
+            .env(EnvVars::DENO_NO_UPDATE_CHECK, "1");
+        Ok(environment)
     }
 }
 

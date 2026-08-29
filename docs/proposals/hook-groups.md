@@ -88,33 +88,72 @@ hooks = [
 
 ## CLI
 
-Add two repeatable options to `prek run`:
+Add three repeatable options to `prek run`:
 
 ```text
 prek run --group <name>
+prek run --require-group <name>
 prek run --no-group <name>
 ```
 
 `--group <name>` is an include filter. When one or more groups are requested, a
 hook is selected if its `groups` contains at least one requested group.
 
+`--require-group <name>` is an intersection filter. A hook is selected only if
+its `groups` contains every required group.
+
 `--no-group <name>` is an exclude filter. A hook is removed if its `groups`
 contains any excluded group.
 
-If both options are provided, exclusion wins:
+`@ungrouped` is reserved as a special selector. It matches hooks whose
+effective `groups` list is empty.
+
+It composes with all three options like an ordinary group membership, but cannot
+be configured in a hook's `groups` list.
+
+The three options compose independently of argument order, and exclusion wins:
 
 1. Select hooks matching `--group`, if any `--group` values were provided.
-2. Remove hooks matching `--no-group`, if any `--no-group` values were provided.
+2. Keep only hooks matching every `--require-group` value, if any were provided.
+3. Remove hooks matching `--no-group`, if any `--no-group` values were provided.
+
+Equivalently, a hook must satisfy:
+
+```text
+(any --group value matches, if specified)
+AND
+(every --require-group value matches)
+AND
+(no --no-group value matches)
+```
 
 Examples:
 
 ```bash
 prek run --all-files --group ci
 prek run --all-files --group lint --group typecheck
+prek run --all-files --require-group lint --require-group fast
 prek run --all-files --no-group format
-prek run --all-files --group ci --no-group slow
+prek run --all-files --group ci --require-group lint --no-group slow
+prek run --all-files --group ci --group @ungrouped
 prek run --all-files --group ci --stage pre-push
 ```
+
+For example, consider these hook groups:
+
+| Hook | Groups |
+| -- | -- |
+| `ty` | `lint-only`, `fast`, `local` |
+| `ruff-format` | `format`, `fast`, `local` |
+| `mypy` | `lint-only`, `slow`, `ci` |
+| `black` | `format`, `slow`, `ci` |
+
+```bash
+prek run --all-files --require-group fast --group format --group lint-only
+```
+
+This represents `fast AND (format OR lint-only)`, so it selects exactly `ty`
+and `ruff-format`. Reordering the options does not change the selection.
 
 ## Selection Model
 
@@ -124,7 +163,7 @@ selection order should be:
 1. Load hooks from selected projects.
 2. Apply positional hook or project includes.
 3. Apply `--skip` selectors and skip environment variables.
-4. Apply group include and exclude filters.
+4. Apply group include, intersection, and exclude filters.
 5. Apply explicit `--stage` filtering, if provided.
 6. If no group filter and no explicit `--stage` were provided, apply the
    existing default `pre-commit` stage filtering and hook-target `manual`
@@ -148,13 +187,14 @@ dependencies, or ecosystems the user intentionally does not want to invoke.
 
 Groups are independent from Git hook stages.
 
-When `--group` and `--no-group` are not used, the existing stage behavior is
-unchanged: omitting `--stage`/`--hook-stage` first selects hooks eligible for
-`pre-commit`. If no hook is selected and the command named hook IDs, those same
-IDs are matched again against hooks configured for `manual`.
+When `--group`, `--require-group`, and `--no-group` are not used, the existing
+stage behavior is unchanged: omitting `--stage`/`--hook-stage` first selects
+hooks eligible for `pre-commit`. If no hook is selected and the command named
+hook IDs, those same IDs are matched again against hooks configured for
+`manual`.
 
-When `--group` or `--no-group` is used without an explicit `--stage`, `prek run`
-enters group selection mode:
+When any group selector is used without an explicit `--stage`, `prek run` enters
+group selection mode:
 
 - Hooks from any configured stage can match.
 - The special second pass that checks named hook IDs against `manual` is not
@@ -174,8 +214,8 @@ according to each hook's normal filters and `pass_filenames` setting; only the
 message-file stages need input that cannot be inferred and are not selected by
 stage-less group runs.
 
-When `--group` or `--no-group` is combined with explicit stage selection, the
-filters compose by intersection:
+When a group selector is combined with explicit stage selection, the filters
+compose by intersection:
 
 ```bash
 prek run --group ci --stage pre-push
@@ -232,10 +272,15 @@ Hooks with omitted `groups` or `groups: []` are ungrouped.
 If no group options are passed, ungrouped hooks run as they do today.
 
 If `--group <name>` is passed, ungrouped hooks do not match and are not run.
-This proposal does not add a virtual `ungrouped` group.
+`--group @ungrouped` includes them explicitly.
+
+If `--require-group <name>` is passed, ungrouped hooks also do not match.
 
 If only `--no-group <name>` is passed, ungrouped hooks remain selected, because
 they do not belong to the excluded group.
+
+`@ungrouped` also works with the other filters. `--require-group @ungrouped`
+keeps only ungrouped hooks, while `--no-group @ungrouped` removes them.
 
 ### Multiple Groups
 
@@ -246,9 +291,12 @@ A hook may belong to multiple groups:
   groups: ["lint", "python", "ci"]
 ```
 
-The hook matches any include group and is excluded by any exclude group:
+The hook matches any include group, every listed required group, and is excluded
+by any exclude group:
 
 - `--group lint` selects it.
+- `--require-group lint --require-group ci` selects it.
+- `--require-group lint --require-group format` does not select it.
 - `--group ci --no-group python` excludes it.
 - `--no-group format` does not exclude it.
 
@@ -263,18 +311,20 @@ groups: ["ci", "ci"]
 
 ### Invalid Group Names
 
-Group names should be non-empty strings and must not contain whitespace. Names
-are matched exactly, so implementations should not trim or normalize group
-names before validation.
+Group names should be non-empty strings, must not contain whitespace, and must
+not start with `@`. Names are matched exactly, so implementations should not
+trim or normalize group names before validation. The `@` namespace is reserved
+for special CLI selectors.
 
 Invalid examples:
 
 ```yaml
-groups: ["", "ci slow", " ci", "ci\nslow"]
+groups: ["", "ci slow", " ci", "ci\nslow", "@custom"]
 ```
 
-No fixed vocabulary should be enforced. In particular, `ci`, `agent`, `slow`,
-`format`, and `lint` are examples, not reserved names.
+Apart from the reserved `@` namespace, no fixed vocabulary should be enforced.
+In particular, `ci`, `agent`, `slow`, `format`, and `lint` are examples, not
+reserved names.
 
 ### Case Sensitivity
 
@@ -285,8 +335,8 @@ configuration key/value behavior.
 
 ### Unknown CLI Groups
 
-If `--group does-not-exist` matches no hooks, the run should fail with the same
-kind of explicit-selection error used for unmatched hook selectors.
+If a group selector matches no hooks, the run should fail with the same kind of
+explicit-selection error used for unmatched hook selectors.
 
 If multiple groups are requested and at least one matches, unmatched group names
 should produce a warning rather than failing the entire run, consistent with
@@ -345,7 +395,7 @@ have made obviously cannot occur, and `prek` should not install or execute it.
 
 ### Try Repo
 
-`prek try-repo` should not accept `--group` or `--no-group`.
+`prek try-repo` should not accept `--group`, `--require-group`, or `--no-group`.
 
 `try-repo` builds a temporary project configuration from the remote hook
 manifest. That generated configuration contains hook ids, but it does not have
@@ -355,10 +405,12 @@ ungrouped. Instead, these flags should be rejected by the CLI.
 
 ### List Command
 
-This proposal does not require changes to `prek list`.
+`prek list` accepts the same `--group`, `--require-group`, and `--no-group`
+filters as `prek run`. This lets users preview the hooks selected by a group
+expression without running them.
 
-It would be useful for `prek list --output-format=json` to include `groups` once
-the field exists, but filtering `prek list` by group can be a follow-up.
+This does not add group metadata to `--output-format=json`; exposing that data
+remains a separate change.
 
 ## Install Behavior
 
@@ -382,20 +434,24 @@ This proposal does not add:
 - A scheduler or dependency group. `priority` remains the scheduling mechanism.
 - DAG scheduling or `after` dependencies.
 - `--output-format=grouped`.
-- A virtual `ungrouped` selector.
 - Default-disabled hooks.
 - Environment variables for group selection.
 - `prek install --group`.
-- `prek try-repo --group` or `prek try-repo --no-group`.
+- `prek try-repo --group`, `prek try-repo --require-group`, or
+  `prek try-repo --no-group`.
 - Global group declarations or validation against a root-level list.
 
 ## Backward Compatibility
 
-If no `groups`, `--group`, or `--no-group` is used, behavior is unchanged.
+If no `groups`, `--group`, `--require-group`, or `--no-group` is used, behavior
+is unchanged.
 
 Existing `stages` behavior is unchanged for normal `prek run` and installed Git
 hook execution. The only new behavior is explicit group selection mode and the
 ability to intersect that mode with an explicitly requested stage.
+
+Group names beginning with `@` are rejected so special selectors cannot collide
+with configured memberships.
 
 Existing configs that contain an unknown `groups` key currently ignore it. Once
 this proposal is implemented, that key becomes meaningful. This is acceptable
@@ -408,13 +464,14 @@ At a high level, implementation should:
 
 1. Add `groups` to config hook types and the built `Hook` type.
 2. Validate group names during config parsing or hook construction.
-3. Add repeatable `--group` and `--no-group` arguments to `prek run`.
+3. Add repeatable `--group`, `--require-group`, and `--no-group` arguments to
+   `prek run`.
 4. Apply group filtering before explicit stage filtering and before install
    selection.
 5. Skip default stage filtering when group mode is active and no explicit
    `--stage` was provided.
-6. Keep `--group` and `--no-group` unsupported for `prek try-repo`.
+6. Keep all group selectors unsupported for `prek try-repo`.
 7. Add schema, documentation, and CLI reference updates.
-8. Add integration tests covering include, exclude, include-plus-exclude,
-   ungrouped hooks, explicit stage intersections, workspace selection, and
-   install avoidance for excluded hooks.
+8. Add integration tests covering include, required intersections, exclude,
+   mixed group filters, ungrouped hooks, explicit stage intersections,
+   workspace selection, and install avoidance for excluded hooks.

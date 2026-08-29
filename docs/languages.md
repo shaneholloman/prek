@@ -11,14 +11,86 @@ Each hook has a `language` that tells prek how to install and run it. The langua
 
 For `repo: local` hooks, `language` is required. For remote hooks, it is read from `.pre-commit-hooks.yaml`, but you can override it in your config.
 
+Most users of remote hooks do not need to choose a language. Start with the
+hook author's manifest and override `language` only when you have a specific
+compatibility or toolchain reason.
+
+For `repo: local` hooks, relative paths in `additional_dependencies` and other installer arguments
+do not resolve from the work tree. Use an absolute path when an installer needs a local file. Hook
+commands still run from the work tree.
+
+## Choose a language for a local hook
+
+| What the command needs | Good starting point | Runtime source |
+| -- | -- | -- |
+| A tool already installed by the project or CI image | [`system`](#system) | Your `PATH`; prek does not install it |
+| A checked-in executable script with no isolated dependencies | [`script`](#script) | The hook repository or local project |
+| An isolated ecosystem environment | Python, Node, Bun, Deno, .NET, Go, mise, Ruby, or Rust | prek can select and download a compatible toolchain |
+| An ecosystem currently supplied by the machine | Conda, Coursier, Dart, Haskell, Julia, Lua, Perl, PHP, R, or Swift | A matching system installation |
+| A fully packaged runtime | [`docker`](#docker) or [`docker_image`](#docker_image) | A supported container runtime |
+| A message-only failure or content regex | [`fail`](#fail), [`pygrep`](#pygrep), or a [builtin hook](builtin.md) | No general-purpose hook environment |
+
+For an existing project linter or formatter, begin with
+[`language = "system"`](local-hooks.md). Choose a managed language when the hook
+repository itself needs an isolated installation or when prek should select the
+toolchain version.
+
 ## Toolchain management and `language_version`
 
-prek resolves toolchains in two steps:
+`language_version` can be a version request string or an options object with
+`request` and `preference` fields. The string form remains shorthand for a
+request with the default `managed` preference.
 
-1. **Discover system toolchains** (PATH and common version manager locations).
-2. **Download a toolchain** when the language supports it and the request cannot be satisfied locally.
+The preferences are:
 
-If `language_version` is `system`, prek skips downloads and requires a system-installed toolchain. If `language_version` is `default`, prek uses the language’s default resolution logic (often preferring system installs, then downloading if supported).
+- `only-managed`: use a compatible toolchain already managed by prek, or download one.
+- `managed` (default): prefer an existing prek-managed toolchain, then search outside prek's managed store, then download one.
+- `system`: prefer a toolchain outside prek's managed store, then try an existing prek-managed toolchain, then download one.
+- `only-system`: only use a toolchain outside prek's managed store and never download one.
+
+Here, “system” means any toolchain discovered outside prek's managed store. It
+includes executables installed by the operating system, a package manager, or a
+version manager.
+
+The preference controls toolchain selection when a hook environment must be
+created. It does not affect reuse of an existing compatible hook environment.
+
+For example:
+
+=== "prek.toml"
+
+    ```toml
+    [[repos]]
+    repo = "local"
+
+    [[repos.hooks]]
+    id = "python-version"
+    name = "python version"
+    language = "python"
+    entry = "python --version"
+    pass_filenames = false
+    language_version = { request = ">=3.12, <3.13", preference = "only-managed" }
+    ```
+
+=== ".pre-commit-config.yaml"
+
+    ```yaml
+    repos:
+      - repo: local
+        hooks:
+          - id: python-version
+            name: python version
+            language: python
+            entry: python --version
+            pass_filenames: false
+            language_version:
+              request: ">=3.12, <3.13"
+              preference: only-managed
+    ```
+
+If `language_version` is `system`, prek does not download a new toolchain. It may still reuse a compatible toolchain already managed by prek before searching system installations. Version constraints derived from project metadata, such as Python’s `requires-python` or Go’s `go` directive, still apply without re-enabling downloads.
+
+If `language_version` is `default`, prek uses the language’s default resolution logic and may download a compatible toolchain when none is available locally.
 
 !!! note "prek-only"
 
@@ -30,7 +102,9 @@ Languages with managed toolchain downloads in prek today:
 - [Node](#node)
 - [Bun](#bun)
 - [Deno](#deno)
+- [.NET](#dotnet)
 - [Golang](#golang)
+- [mise](#mise)
 - [Rust](#rust)
 - [Ruby](#ruby)
 
@@ -313,6 +387,40 @@ Lua does not support `language_version` today. It uses the system `lua` / `luaro
 
 The hook entry should point at an executable installed by LuaRocks.
 
+### mise
+
+!!! note "prek-only"
+
+    Mise language support is a prek extension. pre-commit does not have native
+    `mise` support.
+
+List the tools a hook needs in `additional_dependencies`, using mise tool
+specifications such as `aqua:golangci/golangci-lint@2`. Before running `entry`,
+prek installs those tools in an isolated environment and adds their executables
+to `PATH`.
+
+When downloads are allowed and no compatible mise installation is available,
+prek downloads mise automatically. Installed tools and other mise data stay in prek's hook cache and do not
+modify the user's mise setup.
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint
+        language: mise
+        additional_dependencies: ["aqua:golangci/golangci-lint@2"]
+        entry: golangci-lint run --fast-only ./...
+        pass_filenames: false
+```
+
+#### `language_version`
+
+`language_version` selects the mise CLI, not the installed tools. Prek requires
+mise 2026.5.18 or newer. Supported values are `default`, `system`, exact releases
+such as `=2026.7.18`, and semver ranges such as `>=2026.7, <2027`.
+
 ### node
 
 prek expects a `package.json` and installs via `npm install .`, exposing executables from the package `bin`. `entry` should match a provided bin name. `additional_dependencies` are supported.
@@ -413,7 +521,7 @@ For remote hook repositories, `language_version` may be inferred from
 prek uses `uv` for creating virtual environments and installing dependencies:
 
 - First tries to find `uv` in the system PATH
-- If not found, automatically installs `uv` from the best available source (GitHub releases, PyPI, or mirrors)
+- If not found, automatically installs `uv` from Astral's CDN, falling back to PyPI (and mirrors) then `pip`
 - Automatically installs the required Python version if it's not already available
 
 !!! warning "Environment variables"
@@ -611,7 +719,7 @@ By default, missing checksums produce a warning and the download continues witho
 #### Rules
 
 - `additional_dependencies` are treated as executable installs. Each item should be something `deno install --global` can install, such as an `npm:` or `jsr:` specifier.
-- `additional_dependencies` may also point at a local file to install as an executable, using `./path/to/tool.ts:name`. Relative paths resolve from the hook repository for remote hooks and from the work repository for local hooks.
+- For remote hooks, `additional_dependencies` may point at a file in the hook repository using `./path/to/tool.ts:name`. Relative install targets are not supported for `repo: local` hooks.
 - To override the executable name for an additional dependency, append `:name` to the dependency string. For example: `npm:semver@7:semver-tool`.
 
 For remote hooks, if the repo wants to provide its own executable, declare it explicitly in the hook's `additional_dependencies`, for example `./cli.ts:repo-tool`, and then use `repo-tool` in `entry`.
@@ -667,21 +775,6 @@ repos:
         entry: semver-tool 1.2.3
         additional_dependencies:
           - npm:semver@7:semver-tool
-        pass_filenames: false
-```
-
-You can also install a local file as an executable additional dependency:
-
-```yaml
-repos:
-  - repo: local
-    hooks:
-      - id: local-tool
-        name: local tool
-        language: deno
-        entry: echo-tool
-        additional_dependencies:
-          - ./tool.ts:echo-tool
         pass_filenames: false
 ```
 

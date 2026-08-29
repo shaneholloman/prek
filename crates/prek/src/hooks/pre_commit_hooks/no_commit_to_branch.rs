@@ -3,16 +3,25 @@ use fancy_regex::Regex;
 
 use crate::git::git_cmd;
 use crate::hook::Hook;
+use crate::hooks::HookOutput;
+use crate::hooks::pre_commit_hooks::parse_hook_args;
 use anyhow::{Context, Result};
 
 #[derive(Parser)]
 #[command(disable_help_subcommand = true)]
 #[command(disable_version_flag = true)]
 #[command(disable_help_flag = true)]
-struct Args {
-    #[arg(short, long = "branch", default_values = &["main", "master"])]
+pub(crate) struct Args {
+    /// Branch to protect (repeatable).
+    #[arg(
+        short,
+        long = "branch",
+        value_name = "BRANCH",
+        default_values = &["main", "master"]
+    )]
     branches: Vec<String>,
-    #[arg(short, long = "pattern")]
+    /// Regular expression matching branches to protect (repeatable).
+    #[arg(short, long = "pattern", value_name = "REGEX")]
     patterns: Vec<String>,
 }
 
@@ -23,8 +32,11 @@ impl Args {
         }
 
         for pattern in &self.patterns {
-            let pattern = Regex::new(pattern).context("Failed to compile regex patterns")?;
-            if pattern.is_match(branch).unwrap_or(false) {
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("Failed to compile regex pattern `{pattern}`"))?;
+            if regex.is_match(branch).with_context(|| {
+                format!("Failed to match branch against regex pattern `{pattern}`")
+            })? {
                 return Ok(true);
             }
         }
@@ -33,8 +45,9 @@ impl Args {
     }
 }
 
-pub(crate) async fn no_commit_to_branch(hook: &Hook) -> Result<(i32, Vec<u8>)> {
-    let args = Args::try_parse_from(hook.entry.expect_direct().split_with_args(&hook.args)?)?;
+/// Runs the `no-commit-to-branch` hook.
+pub(crate) async fn run(hook: &Hook) -> Result<HookOutput> {
+    let args = parse_hook_args::<Args>(hook)?;
 
     let output = git_cmd()?
         .arg("symbolic-ref")
@@ -44,7 +57,7 @@ pub(crate) async fn no_commit_to_branch(hook: &Hook) -> Result<(i32, Vec<u8>)> {
         .await?;
 
     if !output.status.success() {
-        return Ok((0, Vec::new()));
+        return Ok(HookOutput::unchanged(0, Vec::new()));
     }
 
     let ref_name = String::from_utf8_lossy(&output.stdout);
@@ -53,8 +66,28 @@ pub(crate) async fn no_commit_to_branch(hook: &Hook) -> Result<(i32, Vec<u8>)> {
 
     if args.check_protected(branch)? {
         let err_msg = format!("You are not allowed to commit to branch '{branch}'\n");
-        Ok((1, err_msg.into_bytes()))
+        Ok(HookOutput::unchanged(1, err_msg.into_bytes()))
     } else {
-        Ok((0, Vec::new()))
+        Ok(HookOutput::unchanged(0, Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+
+    #[test]
+    fn pattern_runtime_errors_include_pattern() {
+        let args = Args {
+            branches: Vec::new(),
+            patterns: vec![r"^(a|aa)+\1$".to_string()],
+        };
+        let branch = format!("{}b", "a".repeat(40));
+
+        let err = args.check_protected(&branch).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r"Failed to match branch against regex pattern `^(a|aa)+\1$`"
+        );
     }
 }

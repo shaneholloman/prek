@@ -7,6 +7,7 @@ use std::sync::{LazyLock, OnceLock};
 use anyhow::Result;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use rustc_hash::FxHashSet;
+use same_file::is_same_file;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, instrument, warn};
 
@@ -37,8 +38,9 @@ pub(crate) enum Error {
 pub(crate) static GIT: LazyLock<Result<PathBuf, which::Error>> =
     LazyLock::new(|| which::which("git"));
 
-// Git hooks can expose `GIT_DIR` without `GIT_WORK_TREE`. Keep the derived
-// work tree scoped to prek's own git commands so user hooks do not inherit it.
+// Git can expose `GIT_DIR` without `GIT_WORK_TREE` to hooks. Keep the derived
+// work tree in process-local state and add it only when preserving the current
+// repository requires it.
 static GIT_WORK_TREE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 pub(crate) fn init_git_work_tree() -> Result<()> {
@@ -62,45 +64,47 @@ fn git_work_tree() -> Option<&'static Path> {
 }
 
 pub(crate) static GIT_ROOT: LazyLock<Result<PathBuf, Error>> = LazyLock::new(|| {
-    get_root()
+    root()
         .map(|root| dunce::canonicalize(&root).unwrap_or(root))
         .inspect(|root| {
             debug!("Git root: {}", root.display());
         })
 });
 
-/// Remove some `GIT_` environment variables exposed by `git`.
+/// Repository-local environment variables cleared before operating on another repository.
 ///
-/// For some commands, like `git commit -a` or `git commit -p`, git creates a `.git/index.lock` file
-/// and set `GIT_INDEX_FILE` to point to it.
-/// We need to keep the `GIT_INDEX_FILE` env var to make sure `git write-tree` works correctly.
-/// <https://stackoverflow.com/questions/65639403/git-pre-commit-hook-how-can-i-get-added-modified-files-when-commit-with-a-flag/65647202#65647202>
-static GIT_ENVS_TO_REMOVE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
-    let keep = &[
-        "GIT_EXEC_PATH",
-        "GIT_SSH",
-        "GIT_SSH_COMMAND",
-        "GIT_SSL_CAINFO",
-        "GIT_SSL_NO_VERIFY",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_HTTP_PROXY_AUTHMETHOD",
-        "GIT_ALLOW_PROTOCOL",
-        "GIT_ASKPASS",
-    ];
-
-    std::env::vars()
-        .filter(|(k, _)| {
-            k.starts_with("GIT_")
-                && !k.starts_with("GIT_CONFIG_KEY_")
-                && !k.starts_with("GIT_CONFIG_VALUE_")
-                && !keep.contains(&k.as_str())
-        })
-        .collect()
-});
+/// `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, and `GIT_CONFIG_VALUE_*`
+/// are deliberately excluded so nested Git commands retain caller-supplied command-scoped settings.
+static GIT_REPO_LOCAL_ENVS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
 
 pub(crate) trait GitCommandExt {
-    fn isolate_from_git_env(&mut self) -> &mut Self;
+    /// Keep nested Git commands operating on the repository that invoked the hook.
+    ///
+    /// Git treats the current directory as the work tree when `GIT_DIR` is set but
+    /// `GIT_WORK_TREE` is not. If prek starts the hook in a subdirectory, this method passes
+    /// the original work tree explicitly so Git commands in the hook still use the repository
+    /// that invoked prek.
+    ///
+    /// A hook that intentionally operates on another repository must clear Git's
+    /// repository-local environment before starting Git.
+    fn preserve_current_worktree(&mut self, hook_cwd: &Path) -> &mut Self;
+
+    fn sanitize_git_repo_env(&mut self) -> &mut Self;
 }
 
 pub(crate) fn apply_git_work_tree(cmd: &mut Command) -> &mut Command {
@@ -111,15 +115,20 @@ pub(crate) fn apply_git_work_tree(cmd: &mut Command) -> &mut Command {
 }
 
 impl GitCommandExt for Cmd {
-    fn isolate_from_git_env(&mut self) -> &mut Self {
-        // `git_cmd()` adds this synthetic value as a command-local env. Commands
-        // that call `isolate_from_git_env()` are intentionally detached from the
-        // current repo, so remove it here; inherited `GIT_WORK_TREE` is handled
-        // by `GIT_ENVS_TO_REMOVE`.
-        if git_work_tree().is_some() {
-            self.env_remove(EnvVars::GIT_WORK_TREE);
+    fn preserve_current_worktree(&mut self, hook_cwd: &Path) -> &mut Self {
+        let Some(work_tree) = git_work_tree() else {
+            return self;
+        };
+        let is_work_tree_root =
+            hook_cwd == work_tree || is_same_file(hook_cwd, work_tree).unwrap_or(false);
+        if !is_work_tree_root {
+            self.env(EnvVars::GIT_WORK_TREE, work_tree);
         }
-        for (key, _) in GIT_ENVS_TO_REMOVE.iter() {
+        self
+    }
+
+    fn sanitize_git_repo_env(&mut self) -> &mut Self {
+        for key in GIT_REPO_LOCAL_ENVS {
             self.env_remove(key);
         }
         self
@@ -157,6 +166,24 @@ fn path_from_git_bytes(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
     str::from_utf8(bytes).map(PathBuf::from)
 }
 
+#[cfg(unix)]
+#[expect(clippy::unnecessary_wraps)]
+fn path_to_git_bytes(path: &Path) -> std::io::Result<&[u8]> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    Ok(path.as_os_str().as_bytes())
+}
+
+#[cfg(not(unix))]
+fn path_to_git_bytes(path: &Path) -> std::io::Result<&[u8]> {
+    path.to_str().map(str::as_bytes).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Path is not valid UTF-8: `{}`", path.display()),
+        )
+    })
+}
+
 pub(crate) async fn intent_to_add_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let output = git_cmd()?
         .arg("diff")
@@ -172,7 +199,7 @@ pub(crate) async fn intent_to_add_files(root: &Path) -> Result<Vec<PathBuf>, Err
     Ok(zsplit(&output.stdout)?)
 }
 
-pub(crate) async fn get_added_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(crate) async fn staged_added_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let output = git_cmd()?
         .current_dir(root)
         .arg("diff")
@@ -190,7 +217,7 @@ pub(crate) async fn get_added_files(root: &Path) -> Result<Vec<PathBuf>, Error> 
     Ok(zsplit(&output.stdout)?)
 }
 
-pub(crate) async fn get_changed_files(
+pub(crate) async fn changed_files(
     old: &str,
     new: &str,
     root: &Path,
@@ -226,50 +253,49 @@ pub(crate) async fn get_changed_files(
     Ok(zsplit(&output.stdout)?)
 }
 
-#[instrument(level = "trace")]
-pub(crate) async fn ls_files(cwd: &Path, path: &Path) -> Result<Vec<PathBuf>, Error> {
-    let output = git_cmd()?
-        .current_dir(cwd)
+#[instrument(level = "trace", skip(paths))]
+pub(crate) async fn ls_files<P>(
+    cwd: &Path,
+    paths: impl IntoIterator<Item = P>,
+) -> Result<Vec<PathBuf>, Error>
+where
+    P: AsRef<Path>,
+{
+    let mut cmd = git_cmd()?;
+    cmd.current_dir(cwd)
+        .arg("--literal-pathspecs")
         .arg("ls-files")
         .arg("-z")
-        .arg("--")
-        .arg(path)
-        .check(true)
-        .output()
-        .await?;
+        .arg("--");
+    for path in paths {
+        cmd.arg(path.as_ref());
+    }
+    let output = cmd.check(true).output().await?;
 
     Ok(zsplit(&output.stdout)?)
 }
 
-pub(crate) async fn get_git_dir() -> Result<PathBuf, Error> {
+pub(crate) async fn git_dir() -> Result<PathBuf, Error> {
     let output = git_cmd()?
         .arg("rev-parse")
         .arg("--git-dir")
         .check(true)
         .output()
         .await?;
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim_ascii(),
-    ))
+    path_from_git_bytes(output.stdout.trim_ascii()).map_err(Error::from)
 }
 
-pub(crate) async fn get_git_common_dir() -> Result<PathBuf, Error> {
+pub(crate) async fn common_dir() -> Result<PathBuf, Error> {
     let output = git_cmd()?
         .arg("rev-parse")
         .arg("--git-common-dir")
         .check(true)
         .output()
         .await?;
-    if output.stdout.trim_ascii().is_empty() {
-        Ok(get_git_dir().await?)
-    } else {
-        Ok(PathBuf::from(
-            String::from_utf8_lossy(&output.stdout).trim_ascii(),
-        ))
-    }
+    path_from_git_bytes(output.stdout.trim_ascii()).map_err(Error::from)
 }
 
-pub(crate) async fn get_git_hooks_dir() -> Result<PathBuf, Error> {
+pub(crate) async fn hooks_dir() -> Result<PathBuf, Error> {
     // Ask Git for the effective hooks directory instead of reconstructing it
     // ourselves. That lets Git apply the full precedence chain for
     // `core.hooksPath`, including local/worktree config, linked worktrees, bare
@@ -282,10 +308,11 @@ pub(crate) async fn get_git_hooks_dir() -> Result<PathBuf, Error> {
         .check(true)
         .output()
         .await?;
-    let hooks_dir = if output.stdout.trim_ascii().is_empty() {
-        get_git_common_dir().await?.join("hooks")
+    let stdout = output.stdout.trim_ascii();
+    let hooks_dir = if stdout.is_empty() {
+        common_dir().await?.join("hooks")
     } else {
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim_ascii())
+        path_from_git_bytes(stdout)?
     };
 
     let cleaned = hooks_dir.clean();
@@ -301,7 +328,7 @@ pub(crate) async fn get_git_hooks_dir() -> Result<PathBuf, Error> {
     }
 }
 
-pub(crate) async fn get_staged_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(crate) async fn staged_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let output = git_cmd()?
         .current_dir(root)
         .arg("diff")
@@ -358,11 +385,11 @@ pub(crate) async fn has_diff(rev: &str, path: &Path) -> Result<bool> {
 }
 
 pub(crate) async fn is_in_merge_conflict() -> Result<bool, Error> {
-    let git_dir = get_git_dir().await?;
+    let git_dir = git_dir().await?;
     Ok(git_dir.join("MERGE_HEAD").try_exists()? && git_dir.join("MERGE_MSG").try_exists()?)
 }
 
-pub(crate) async fn get_conflicted_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(crate) async fn conflicted_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let tree = git_cmd()?.arg("write-tree").check(true).output().await?;
 
     let output = git_cmd()?
@@ -389,7 +416,7 @@ pub(crate) async fn get_conflicted_files(root: &Path) -> Result<Vec<PathBuf>, Er
 }
 
 async fn parse_merge_msg_for_conflicts() -> Result<Vec<PathBuf>, Error> {
-    let git_dir = get_git_dir().await?;
+    let git_dir = git_dir().await?;
     let merge_msg = git_dir.join("MERGE_MSG");
     let content = fs_err::tokio::read_to_string(&merge_msg).await?;
     let conflicts = content
@@ -428,10 +455,15 @@ pub(crate) async fn has_worktree_diff(path: &Path) -> Result<bool, Error> {
 }
 
 #[instrument(level = "trace")]
-pub(crate) async fn get_diff(path: &Path) -> Result<Vec<u8>, Error> {
+pub(crate) async fn diff_worktree(path: &Path) -> Result<Vec<u8>, Error> {
     let output = git_cmd()?
         .arg("diff")
-        .hidden_args(["--no-ext-diff", "--no-textconv", "--ignore-submodules"])
+        .hidden_args([
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules",
+        ])
         .arg("--")
         .arg(path)
         // This diff is only used as a best-effort before/after snapshot of
@@ -459,14 +491,12 @@ pub(crate) async fn get_diff(path: &Path) -> Result<Vec<u8>, Error> {
 /// The index must be in a fully merged state.
 pub(crate) async fn write_tree() -> Result<String, Error> {
     let output = git_cmd()?.arg("write-tree").check(true).output().await?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_ascii()
-        .to_string())
+    Ok(str::from_utf8(output.stdout.trim_ascii())?.to_string())
 }
 
-/// Get the path of the top-level directory of the working tree.
+/// Return the path of the top-level directory of the working tree.
 #[instrument(level = "trace")]
-pub(crate) fn get_root() -> Result<PathBuf, Error> {
+pub(crate) fn root() -> Result<PathBuf, Error> {
     let git = GIT.as_ref().map_err(|&e| Error::GitNotFound(e))?;
     let mut cmd = Command::new(git);
     let output = apply_git_work_tree(&mut cmd)
@@ -494,7 +524,7 @@ pub(crate) async fn init_repo(url: &str, path: &Path) -> Result<(), Error> {
         .arg("init")
         .arg("--template=")
         .arg(path)
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .check(true)
         .output()
         .await?;
@@ -505,7 +535,7 @@ pub(crate) async fn init_repo(url: &str, path: &Path) -> Result<(), Error> {
         .arg("add")
         .arg("origin")
         .arg(url)
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .check(true)
         .output()
         .await?;
@@ -568,7 +598,7 @@ async fn shallow_clone(
         .arg("origin")
         .arg(rev)
         .arg("--depth=1")
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .env(EnvVars::LC_ALL, "C")
         .env(EnvVars::GIT_TERMINAL_PROMPT, terminal_prompt.env_value())
         .check(true)
@@ -579,7 +609,7 @@ async fn shallow_clone(
         .current_dir(path)
         .arg("checkout")
         .arg("FETCH_HEAD")
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .env(EnvVars::PREK_INTERNAL__SKIP_POST_CHECKOUT, "1")
         .env(EnvVars::LC_ALL, "C")
         .env(EnvVars::GIT_TERMINAL_PROMPT, terminal_prompt.env_value())
@@ -598,7 +628,7 @@ async fn full_clone(rev: &str, path: &Path, terminal_prompt: TerminalPrompt) -> 
         .arg("fetch")
         .arg("origin")
         .arg("--tags")
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .env(EnvVars::LC_ALL, "C")
         .env(EnvVars::GIT_TERMINAL_PROMPT, terminal_prompt.env_value())
         .check(true)
@@ -609,7 +639,7 @@ async fn full_clone(rev: &str, path: &Path, terminal_prompt: TerminalPrompt) -> 
         .current_dir(path)
         .arg("checkout")
         .arg(rev)
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .env(EnvVars::PREK_INTERNAL__SKIP_POST_CHECKOUT, "1")
         .env(EnvVars::LC_ALL, "C")
         .env(EnvVars::GIT_TERMINAL_PROMPT, terminal_prompt.env_value())
@@ -641,7 +671,7 @@ async fn update_submodules(
     if shallow {
         cmd.arg("--depth=1");
     }
-    cmd.isolate_from_git_env()
+    cmd.sanitize_git_repo_env()
         .env(EnvVars::LC_ALL, "C")
         .env(EnvVars::GIT_TERMINAL_PROMPT, terminal_prompt.env_value())
         .check(true)
@@ -661,7 +691,7 @@ async fn should_update_submodules(path: &Path) -> Result<bool, Error> {
         .arg("ls-files")
         .arg("-z")
         .arg("-s")
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .env(EnvVars::LC_ALL, "C")
         .check(true)
         .output()
@@ -702,7 +732,7 @@ pub(crate) async fn clone_repo(
     clone_repo_attempt(rev, path, terminal_prompt).await
 }
 
-async fn get_config_value(scope: Option<&str>, key: &str) -> Result<Option<Vec<u8>>, Error> {
+async fn config_value(scope: Option<&str>, key: &str) -> Result<Option<Vec<u8>>, Error> {
     let mut cmd = git_cmd()?;
     cmd.arg("config").arg("--includes");
     if let Some(scope) = scope {
@@ -722,11 +752,11 @@ async fn has_config_value(scope: Option<&str>, key: &str) -> Result<bool, Error>
     // An empty config value still counts as configured and can affect Git's
     // path resolution, e.g. `core.hooksPath=` makes `--git-path hooks`
     // resolve to the current directory.
-    Ok(get_config_value(scope, key).await?.is_some())
+    Ok(config_value(scope, key).await?.is_some())
 }
 
 async fn config_value_is_empty(scope: Option<&str>, key: &str) -> Result<bool, Error> {
-    Ok(get_config_value(scope, key)
+    Ok(config_value(scope, key)
         .await?
         .as_deref()
         .is_some_and(|value| value.strip_suffix(b"\0").unwrap_or(value).is_empty()))
@@ -745,7 +775,7 @@ pub(crate) async fn has_repo_hooks_path_set() -> Result<bool, Error> {
 ///
 /// This mirrors the relevant parts of Git's `git_config_perm` in `setup.c`
 /// and `calc_shared_perm` in `path.c`.
-fn shared_repository_file_mode(value: &str, mode: u32) -> Option<u32> {
+fn apply_shared_repository_file_mode(value: &str, mode: u32) -> Option<u32> {
     const PERM_GROUP: u32 = 0o660;
     const PERM_EVERYBODY: u32 = 0o664;
 
@@ -790,7 +820,7 @@ fn shared_repository_file_mode(value: &str, mode: u32) -> Option<u32> {
 }
 
 /// Resolve the file mode implied by `core.sharedRepository` for a newly created file.
-pub(crate) async fn get_shared_repository_file_mode(mode: u32) -> Result<u32> {
+pub(crate) async fn shared_repository_file_mode(mode: u32) -> Result<u32> {
     let output = git_cmd()?
         .arg("config")
         .arg("--get")
@@ -800,13 +830,13 @@ pub(crate) async fn get_shared_repository_file_mode(mode: u32) -> Result<u32> {
         .await?;
     if output.status.success() {
         let value = str::from_utf8(&output.stdout)?;
-        Ok(shared_repository_file_mode(value, mode).unwrap_or(mode))
+        Ok(apply_shared_repository_file_mode(value, mode).unwrap_or(mode))
     } else {
         Ok(mode)
     }
 }
 
-pub(crate) async fn get_lfs_files(
+pub(crate) async fn lfs_files(
     current_dir: &Path,
     paths: &[&Path],
 ) -> Result<FxHashSet<PathBuf>, Error> {
@@ -831,7 +861,7 @@ pub(crate) async fn get_lfs_files(
 
     let writer = async move {
         for path in paths {
-            stdin.write_all(path.to_string_lossy().as_bytes()).await?;
+            stdin.write_all(path_to_git_bytes(path)?).await?;
             stdin.write_all(b"\0").await?;
         }
         stdin.shutdown().await?;
@@ -857,11 +887,10 @@ pub(crate) async fn get_lfs_files(
     }
 
     let mut lfs_files = FxHashSet::default();
-    let read_result = String::from_utf8_lossy(&read_result);
-    let mut it = read_result.split_terminator('\0');
+    let mut it = read_result.split(|&byte| byte == b'\0');
     while let (Some(file), Some(_attr), Some(value)) = (it.next(), it.next(), it.next()) {
-        if value == "lfs" {
-            lfs_files.insert(PathBuf::from(file));
+        if value == b"lfs" {
+            lfs_files.insert(path_from_git_bytes(file)?);
         }
     }
 
@@ -904,8 +933,8 @@ pub(crate) async fn is_ancestor(ancestor: &str, commit: &str) -> Result<bool, Er
     Ok(false)
 }
 
-/// Get commits that are ancestors of the given commit but not in the specified remote
-pub(crate) async fn get_ancestors_not_in_remote(
+/// Return commits that are ancestors of the given commit but not in the specified remote.
+pub(crate) async fn ancestors_not_in_remote(
     local_sha: &str,
     remote_name: &str,
 ) -> Result<Vec<String>, Error> {
@@ -926,8 +955,8 @@ pub(crate) async fn get_ancestors_not_in_remote(
         .collect())
 }
 
-/// Get root commits (commits with no parents) for the given commit
-pub(crate) async fn get_root_commits(local_sha: &str) -> Result<FxHashSet<String>, Error> {
+/// Return root commits (commits with no parents) for the given commit.
+pub(crate) async fn root_commits(local_sha: &str) -> Result<FxHashSet<String>, Error> {
     let output = git_cmd()?
         .arg("rev-list")
         .arg("--max-parents=0")
@@ -942,8 +971,8 @@ pub(crate) async fn get_root_commits(local_sha: &str) -> Result<FxHashSet<String
         .collect())
 }
 
-/// Get the parent commit of the given commit
-pub(crate) async fn get_parent_commit(commit: &str) -> Result<Option<String>, Error> {
+/// Return the parent commit of the given commit.
+pub(crate) async fn parent_commit(commit: &str) -> Result<Option<String>, Error> {
     let output = git_cmd()?
         .arg("rev-parse")
         .arg(format!("{commit}^"))
@@ -971,31 +1000,42 @@ pub(crate) fn list_submodules(git_root: &Path) -> Result<Vec<PathBuf>, Error> {
     let output = apply_git_work_tree(&mut cmd)
         .current_dir(git_root)
         .arg("config")
+        .arg("--null")
         .arg("--file")
         .arg(".gitmodules")
         .arg("--get-regexp")
         .arg(r"^submodule\..*\.path$")
         .output()?;
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_ascii()
-        .lines()
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .map(|submodule| git_root.join(submodule))
-        .collect())
+    let mut submodules = Vec::new();
+    // With `--null`, Git separates each key from its value with `\n` and records with NUL.
+    for entry in output.stdout.split(|&byte| byte == b'\0') {
+        let Some(separator) = entry.iter().position(|&byte| byte == b'\n') else {
+            continue;
+        };
+        let path = &entry[separator + 1..];
+        if path.is_empty() {
+            continue;
+        }
+        submodules.push(git_root.join(path_from_git_bytes(path)?));
+    }
+    Ok(submodules)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
     #[cfg(unix)]
+    use super::lfs_files;
     use super::zsplit;
     use super::{
-        Error, GIT, TerminalPrompt, full_clone, init_repo, shared_repository_file_mode,
-        should_update_submodules, update_submodules,
+        Error, GIT, TerminalPrompt, apply_shared_repository_file_mode, full_clone, init_repo,
+        list_submodules, should_update_submodules, update_submodules,
     };
     use assert_cmd::assert::OutputAssertExt;
-    use std::path::Path;
-    use std::process::Command;
 
     fn run_git(path: &Path, args: &[&str]) {
         let mut command = Command::new(GIT.as_ref().unwrap());
@@ -1070,7 +1110,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, Error::Command(_)));
+        assert_matches!(err, Error::Command(_));
         let message = err.to_string();
         assert!(message.contains("submodule update --init --recursive"));
         assert!(message.contains("--depth=1"));
@@ -1079,7 +1119,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, Error::Command(_)));
+        assert_matches!(err, Error::Command(_));
         let message = err.to_string();
         assert!(message.contains("submodule update --init --recursive"));
         assert!(!message.contains("--depth=1"));
@@ -1098,29 +1138,102 @@ mod tests {
     }
 
     #[test]
+    fn zsplit_preserves_leading_and_trailing_spaces() {
+        let paths = zsplit(b" leading.py\0trailing.py \0").unwrap();
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from(" leading.py"), PathBuf::from("trailing.py ")]
+        );
+    }
+
+    #[test]
+    fn list_submodules_preserves_spaces_in_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init"]);
+        fs_err::write(
+            tmp.path().join(".gitmodules"),
+            "[submodule \"space\"]\n\tpath = modules/with space\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            list_submodules(tmp.path()).unwrap(),
+            vec![tmp.path().join("modules/with space")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_submodules_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init"]);
+        fs_err::write(
+            tmp.path().join(".gitmodules"),
+            b"[submodule \"raw\"]\n\tpath = modules/bad-\xff\n",
+        )
+        .unwrap();
+
+        let submodules = list_submodules(tmp.path()).unwrap();
+
+        assert_eq!(
+            submodules[0]
+                .strip_prefix(tmp.path())
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            b"modules/bad-\xff"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lfs_files_preserves_non_utf8_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init"]);
+        fs_err::write(tmp.path().join(".gitattributes"), "* filter=lfs\n").unwrap();
+        let path = Path::new(OsStr::from_bytes(b"bad-\xff.bin"));
+
+        let files = lfs_files(tmp.path(), &[path]).await.unwrap();
+
+        assert!(files.contains(path));
+    }
+
+    #[test]
     fn shared_repository_group_mode_matches_git_behavior() {
         for value in ["group", "true", "yes", "on", "1"] {
-            assert_eq!(shared_repository_file_mode(value, 0o755), Some(0o775));
+            assert_eq!(apply_shared_repository_file_mode(value, 0o755), Some(0o775));
         }
     }
 
     #[test]
     fn shared_repository_everybody_mode_matches_git_behavior() {
         for value in ["all", "world", "everybody", "2"] {
-            assert_eq!(shared_repository_file_mode(value, 0o755), Some(0o775));
+            assert_eq!(apply_shared_repository_file_mode(value, 0o755), Some(0o775));
         }
     }
 
     #[test]
     fn shared_repository_octal_mode_matches_git_behavior() {
-        assert_eq!(shared_repository_file_mode("0640", 0o644), Some(0o640));
-        assert_eq!(shared_repository_file_mode("0640", 0o755), Some(0o750));
+        assert_eq!(
+            apply_shared_repository_file_mode("0640", 0o644),
+            Some(0o640)
+        );
+        assert_eq!(
+            apply_shared_repository_file_mode("0640", 0o755),
+            Some(0o750)
+        );
     }
 
     #[test]
     fn shared_repository_umask_or_invalid_values_do_not_override_mode() {
         for value in ["", "umask", "false", "no", "off", "0", "invalid", "0400"] {
-            assert_eq!(shared_repository_file_mode(value, 0o755), None);
+            assert_eq!(apply_shared_repository_file_mode(value, 0o755), None);
         }
     }
 }

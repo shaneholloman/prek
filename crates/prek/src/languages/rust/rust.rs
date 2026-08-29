@@ -2,7 +2,6 @@ use std::env::consts::EXE_EXTENSION;
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -13,18 +12,15 @@ use prek_consts::prepend_paths;
 use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::fs::is_executable;
 use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
-use crate::languages::LanguageBackend;
 use crate::languages::rust::RustRequest;
 use crate::languages::rust::installer::RustInstaller;
 use crate::languages::rust::rustup::Rustup;
 use crate::languages::rust::version::{Channel, EXTRA_KEY_CHANNEL};
-use crate::languages::version::LanguageRequest;
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::{CacheBucket, Store, ToolBucket};
 
 fn format_cargo_dependency(dep: &str) -> String {
@@ -276,7 +272,7 @@ async fn install_local_project(
             .current_dir(&package_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .isolate_from_git_env()
+            .sanitize_git_repo_env()
             .check(true)
             .output()
             .await?;
@@ -325,7 +321,7 @@ async fn install_local_project(
         cmd.current_dir(&manifest_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .isolate_from_git_env()
+            .sanitize_git_repo_env()
             .check(true)
             .output()
             .await?;
@@ -348,7 +344,7 @@ async fn install_local_project(
         cmd.current_dir(&package_dir)
             .env(EnvVars::PATH, new_path)
             .env(EnvVars::CARGO_HOME, cargo_home)
-            .isolate_from_git_env()
+            .sanitize_git_repo_env()
             .check(true)
             .output()
             .await?;
@@ -370,18 +366,20 @@ async fn install_cli_dependency(
     cargo: &Path,
     cargo_home: &Path,
     new_path: &OsStr,
+    install_cwd: &Path,
 ) -> anyhow::Result<()> {
     let dep = CargoCliDependency::from_str(cli_dep)?;
 
     let mut cmd = Cmd::new(cargo);
-    cmd.args(["install", "--bins", "--root"])
+    cmd.current_dir(install_cwd)
+        .args(["install", "--bins", "--root"])
         .arg(&info.env_path)
         .args(dep.to_cargo_args())
         .arg("--locked");
 
     cmd.env(EnvVars::PATH, new_path)
         .env(EnvVars::CARGO_HOME, cargo_home)
-        .isolate_from_git_env()
+        .sanitize_git_repo_env()
         .check(true)
         .output()
         .await?;
@@ -398,6 +396,7 @@ impl LanguageBackend for Rust {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> anyhow::Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -408,14 +407,10 @@ impl LanguageBackend for Rust {
         let rustup = Rustup::install(store, &rustup_dir).await?;
         let installer = RustInstaller::new(rustup);
 
-        let (version, allows_download) = match &hook.language_request {
-            LanguageRequest::Any { system_only } => (&RustRequest::Any, !system_only),
-            LanguageRequest::Rust(version) => (version, true),
-            _ => unreachable!(),
-        };
+        let version: &RustRequest = hook.language_request.version();
 
         let rust = installer
-            .install(version, allows_download)
+            .install(version, hook.language_request.toolchain_policy())
             .await
             .context("Failed to install rust")?;
         let rustc_bin = bin_dir(rust.toolchain());
@@ -454,7 +449,7 @@ impl LanguageBackend for Rust {
             });
 
         // Use the hook entry as the binary name to find the package, this could be improved by allowing an explicit binary name in the hook config.
-        let hook_entry = hook.entry.expect_direct().split()?;
+        let hook_entry = hook.entry.expect_argv_entry().split()?;
         let hook_bin = hook_entry[0]
             .to_str()
             .context("Rust hook entry binary must be valid UTF-8")?;
@@ -475,7 +470,8 @@ impl LanguageBackend for Rust {
 
         // Install CLI dependencies
         for cli_dep in cli_deps {
-            install_cli_dependency(cli_dep, &info, &cargo, &cargo_home, &new_path).await?;
+            install_cli_dependency(cli_dep, &info, &cargo, &cargo_home, &new_path, install_cwd)
+                .await?;
         }
 
         info.persist_env_path();
@@ -492,60 +488,24 @@ impl LanguageBackend for Rust {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
         store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> anyhow::Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> anyhow::Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Rust hook must have env path");
         let info = hook.install_info().expect("Rust hook must be installed");
-
         let rust_bin = bin_dir(env_dir);
         let cargo_home = store.cache_path(CacheBucket::Cargo);
         let rustc_bin = bin_dir(&info.toolchain);
-
         let new_path = prepend_paths(&[&rust_bin, &rustc_bin]).context("Failed to join PATH")?;
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::PATH, &new_path)
-                .env(EnvVars::CARGO_HOME, &cargo_home)
-                .env(EnvVars::RUSTUP_AUTO_INSTALL, "0")
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::CARGO_HOME, &cargo_home)
+            .env(EnvVars::RUSTUP_AUTO_INSTALL, "0");
+        Ok(environment)
     }
 }
 

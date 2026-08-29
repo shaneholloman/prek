@@ -27,15 +27,18 @@ jobs:
     name: "bloat check"
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: "Install mold"
+        run: ./scripts/install-mold.sh
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.save-rust-cache == 'true' }}
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-bloat
 
@@ -43,7 +46,7 @@ jobs:
         id: bloat_head
         run: |
           # Build head branch
-          cargo bloat --release | tee bloat_head.txt >&1
+          cargo bloat --profile profiling | tee bloat_head.txt >&1
 
       - name: Checkout base
         run: |
@@ -53,7 +56,7 @@ jobs:
         id: bloat_base
         run: |
           # Build base branch
-          cargo bloat --release | tee bloat_base.txt >&1
+          cargo bloat --profile profiling | tee bloat_base.txt >&1
 
       - name: Compare bloat results
         shell: python
@@ -62,7 +65,7 @@ jobs:
           from pathlib import Path
 
           def parse_size(text):
-              match = re.search(r'\.text section size.*?([\d.]+)\s*([KMGT]i?B)', text)
+              match = re.search(r'([\d.]+)\s*([KMGT]i?B)\s+\.text section size', text)
               if not match:
                   raise ValueError("Could not find .text section size")
               value, unit = float(match.group(1)), match.group(2)
@@ -80,7 +83,7 @@ jobs:
           pct_display = f"{pct_change:+.2f}%"
           comparison = f"""\
           ### 📦 Cargo Bloat Comparison
-          **Binary size change:** {pct_display} ({base_size} → {head_size})
+          **`.text` size change:** {pct_display} ({base_size} → {head_size})
 
           <details>
             <summary>Expand for cargo-bloat output</summary>
@@ -118,7 +121,7 @@ jobs:
       HYPERFINE_HEAD_BINARY: prek-head
       HYPERFINE_BASE_BINARY: prek-base
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -128,7 +131,7 @@ jobs:
           mkdir -p "$HYPERFINE_BIN_DIR"
           echo "$HYPERFINE_BIN_DIR" >> "$GITHUB_PATH"
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.save-rust-cache == 'true' }}
 
@@ -152,7 +155,7 @@ jobs:
           cargo build --profile profiling && mv target/profiling/prek "$HYPERFINE_BIN_DIR/$HYPERFINE_HEAD_BINARY"
 
       - name: Install hyperfine
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: hyperfine
 

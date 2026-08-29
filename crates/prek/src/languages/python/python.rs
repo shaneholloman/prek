@@ -1,10 +1,9 @@
 use std::env::consts::EXE_EXTENSION;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use mea::once::OnceMap;
+use asyncband::once::OnceMap;
 use prek_consts::env_vars::EnvVars;
 use prek_consts::prepend_paths;
 use rustc_hash::FxBuildHasher;
@@ -12,17 +11,15 @@ use serde::Deserialize;
 use tracing::{debug, trace};
 
 use crate::cli::reporter::HookInstallReporter;
-use crate::cli::run::HookRunReporter;
 use crate::git::GitCommandExt;
 use crate::hook::InstalledHook;
 use crate::hook::{Hook, InstallInfo};
-use crate::languages::LanguageBackend;
 use crate::languages::python::PythonRequest;
 use crate::languages::python::uv::Uv;
-use crate::languages::version::LanguageRequest;
+use crate::languages::version::{LanguageRequest, ToolchainSource};
+use crate::languages::{ExecutionEnvironment, LanguageBackend};
 use crate::process;
 use crate::process::Cmd;
-use crate::run::run_by_batch;
 use crate::store::{Store, ToolBucket};
 
 #[derive(Debug, Copy, Clone)]
@@ -33,16 +30,15 @@ pub(crate) struct PythonInfo {
     pub(crate) python_exec: PathBuf,
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum PythonInfoError {
     #[error("Failed to parse Python info JSON: {0}")]
     Parse(String),
     #[error("Failed to query Python info: {0}")]
     Query(String),
-    #[error("{0}")]
-    Message(String),
 }
 
+// Canonical paths let virtual environments backed by the same interpreter share one query.
 static PYTHON_INFO_CACHE: LazyLock<OnceMap<PathBuf, Arc<PythonInfo>, FxBuildHasher>> =
     LazyLock::new(|| OnceMap::with_hasher(FxBuildHasher));
 
@@ -100,12 +96,13 @@ impl LanguageBackend for Python {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
 
         let uv_dir = store.tools_path(ToolBucket::Uv);
-        let uv = Uv::install(store, &uv_dir)
+        let uv = Uv::find_or_install(store, &uv_dir)
             .await
             .context("Failed to install uv")?;
 
@@ -120,6 +117,7 @@ impl LanguageBackend for Python {
 
         // Install dependencies
         let mut pip_install = Self::pip_install_command(&uv, store, &info.env_path);
+        pip_install.current_dir(install_cwd);
 
         if let Some(repo_path) = hook.repo_path() {
             trace!(
@@ -181,71 +179,33 @@ impl LanguageBackend for Python {
         Ok(())
     }
 
-    async fn run(
+    fn execution_environment(
         &self,
-        store: &Store,
+        _store: &Store,
         hook: &InstalledHook,
-        filenames: &[&Path],
-        reporter: &HookRunReporter,
-    ) -> Result<(i32, Vec<u8>)> {
-        let progress = reporter.on_run_start(hook, filenames.len());
-
+    ) -> Result<ExecutionEnvironment> {
         let env_dir = hook.env_path().expect("Python must have env path");
         let new_path = prepend_paths(&[&bin_dir(env_dir)]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
 
-        let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new(&entry[0])
-                .current_dir(hook.work_dir())
-                .args(&entry[1..])
-                .env(EnvVars::VIRTUAL_ENV, env_dir)
-                .env(EnvVars::PATH, &new_path)
-                .env_remove(EnvVars::PYTHONHOME)
-                .envs(&hook.env)
-                .args(&hook.args)
-                .file_args(batch)
-                .check(false)
-                .stdin(Stdio::null())
-                .pty_output_with_sink(reporter.output_sink(progress))
-                .await?;
-
-            reporter.on_run_progress(progress, batch.len() as u64);
-
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
-        };
-
-        let results = run_by_batch(hook, filenames, entry.argv(), run).await?;
-
-        // Collect results
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
-
-        reporter.on_run_complete(progress);
-
-        Ok((combined_status, combined_output))
+        let mut environment = ExecutionEnvironment::new();
+        environment
+            .set_path(&new_path)
+            .env(EnvVars::VIRTUAL_ENV, env_dir)
+            .env_remove(EnvVars::PYTHONHOME);
+        Ok(environment)
     }
 }
 
 fn to_uv_python_request(request: &LanguageRequest) -> Option<String> {
+    let request: &PythonRequest = request.version();
     match request {
-        LanguageRequest::Any { .. } => None,
-        LanguageRequest::Python(request) => match request {
-            PythonRequest::Any => None,
-            PythonRequest::Major(major) => Some(format!("{major}")),
-            PythonRequest::MajorMinor(major, minor) => Some(format!("{major}.{minor}")),
-            PythonRequest::MajorMinorPatch(major, minor, patch) => {
-                Some(format!("{major}.{minor}.{patch}"))
-            }
-            PythonRequest::Range(_, raw) => Some(raw.clone()),
-        },
-        _ => unreachable!(),
+        PythonRequest::Any => None,
+        PythonRequest::Major(major) => Some(format!("{major}")),
+        PythonRequest::MajorMinor(major, minor) => Some(format!("{major}.{minor}")),
+        PythonRequest::MajorMinorPatch(major, minor, patch) => {
+            Some(format!("{major}.{minor}.{patch}"))
+        }
+        PythonRequest::Range(_, raw) => Some(raw.clone()),
     }
 }
 
@@ -273,7 +233,7 @@ impl Python {
         Self::remove_uv_python_override_envs(&mut cmd)
             // Remove GIT environment variables that may leak from git hooks (e.g., in worktrees).
             // These can break packages using setuptools_scm for file discovery.
-            .isolate_from_git_env()
+            .sanitize_git_repo_env()
             .check(true);
         cmd
     }
@@ -284,70 +244,64 @@ impl Python {
         info: &InstallInfo,
         python_request: &LanguageRequest,
     ) -> Result<()> {
-        // Prefer Python installations already managed by prek.
-        match Self::create_venv_command(uv, store, info, python_request, VenvAttempt::PrekManaged)
-            .check(true)
-            .output()
-            .await
-        {
-            Ok(_) => {
-                debug!(
-                    "Venv created with prek-managed Python: `{}`",
-                    info.env_path.display()
-                );
-                return Ok(());
-            }
-            Err(process::Error::Status { .. }) => {}
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
+        let policy = python_request.toolchain_policy();
+        let mut last_error = None;
 
-        // Next, use uv's normal discovery outside prek's managed store.
-        match Self::create_venv_command(uv, store, info, python_request, VenvAttempt::External)
-            .check(true)
-            .output()
-            .await
-        {
-            Ok(_) => {
-                debug!(
-                    "Venv created with Python discovered outside prek's managed store: `{}`",
-                    info.env_path.display()
-                );
-                Ok(())
-            }
-            Err(e @ process::Error::Status { .. }) => {
-                if Self::can_retry_with_downloads(&e) {
-                    if !python_request.allows_download() {
-                        anyhow::bail!(
-                            "No suitable system Python version found and downloads are disabled"
-                        );
-                    }
-
+        for &source in policy.search_order() {
+            let attempt = match source {
+                ToolchainSource::Managed => VenvAttempt::PrekManaged,
+                ToolchainSource::System => VenvAttempt::External,
+            };
+            match Self::try_create_venv(uv, store, info, python_request, attempt).await {
+                Ok(()) => return Ok(()),
+                Err(error @ process::Error::Status { .. }) => {
+                    last_error = Some((source, error));
+                }
+                Err(error) => {
                     debug!(
-                        "Downloading Python into prek's managed store: `{}`",
+                        "Failed to create venv `{}`: {error}",
                         info.env_path.display()
                     );
-                    Self::create_venv_command(
-                        uv,
-                        store,
-                        info,
-                        python_request,
-                        VenvAttempt::Download,
-                    )
-                    .check(true)
-                    .output()
-                    .await?;
-                    return Ok(());
+                    return Err(error.into());
                 }
-                // If we can't retry, return the original error
-                Err(e.into())
-            }
-            Err(e) => {
-                debug!("Failed to create venv `{}`: {e}", info.env_path.display());
-                Err(e.into())
             }
         }
+
+        if let Some((ToolchainSource::System, error)) = last_error
+            && !Self::can_retry_with_downloads(&error)
+        {
+            return Err(error.into());
+        }
+
+        if policy.allows_download() {
+            debug!(
+                "Downloading Python into prek's managed store: `{}`",
+                info.env_path.display()
+            );
+            Self::try_create_venv(uv, store, info, python_request, VenvAttempt::Download).await?;
+            return Ok(());
+        }
+
+        anyhow::bail!("No suitable Python version found for toolchain policy: {policy}")
+    }
+
+    async fn try_create_venv(
+        uv: &Uv,
+        store: &Store,
+        info: &InstallInfo,
+        python_request: &LanguageRequest,
+        attempt: VenvAttempt,
+    ) -> std::result::Result<(), process::Error> {
+        Self::create_venv_command(uv, store, info, python_request, attempt)
+            .check(true)
+            .output()
+            .await?;
+        debug!(
+            ?attempt,
+            "Created Python virtual environment: `{}`",
+            info.env_path.display()
+        );
+        Ok(())
     }
 
     fn create_venv_command(
@@ -448,7 +402,7 @@ mod tests {
 
         let info = InstallInfo::create(Language::Python, None, Vec::new(), &hooks_dir)
             .expect("create install info");
-        let store = Store::from_path(temp.path().join("store"));
+        let store = Store::from_path(temp.path().join("store")).expect("create store");
         let uv = Uv::new(PathBuf::from("uv"));
 
         (temp, uv, store, info)
@@ -471,7 +425,7 @@ mod tests {
         uses_prek_managed_store: bool,
     ) {
         let (_temp, uv, store, info) = setup_test_install();
-        let request = LanguageRequest::Any { system_only: false };
+        let request = LanguageRequest::parse(Language::Python, "").unwrap();
         let cmd = Python::create_venv_command(&uv, &store, &info, &request, attempt);
         let args = cmd
             .get_args()
@@ -496,7 +450,7 @@ mod tests {
     #[test]
     fn create_venv_command_removes_uv_system_python_override() {
         let (_temp, uv, store, info) = setup_test_install();
-        let request = LanguageRequest::Any { system_only: false };
+        let request = LanguageRequest::parse(Language::Python, "").unwrap();
         let cmd = Python::create_venv_command(&uv, &store, &info, &request, VenvAttempt::External);
         let envs = env_map(&cmd);
 

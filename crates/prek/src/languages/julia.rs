@@ -7,6 +7,7 @@ use tracing::debug;
 
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
+use crate::git::GitCommandExt;
 use crate::hook::{Hook, InstallInfo, InstalledHook};
 use crate::languages::LanguageBackend;
 use crate::process::Cmd;
@@ -22,6 +23,7 @@ impl LanguageBackend for Julia {
         &self,
         store: &Store,
         hook: Arc<Hook>,
+        install_cwd: &Path,
         reporter: &HookInstallReporter,
     ) -> Result<InstalledHook> {
         let progress = reporter.on_install_start(&hook);
@@ -63,13 +65,14 @@ impl LanguageBackend for Julia {
         "};
 
         Cmd::new("julia")
-            .current_dir(search_path)
+            .current_dir(install_cwd)
             .arg("--startup-file=no")
             .arg(format!("--project={}", info.env_path.display()))
             .arg("-e")
             .arg(julia_code)
             .arg("--")
             .args(&hook.additional_dependencies)
+            .sanitize_git_repo_env()
             .check(true)
             .output()
             .await
@@ -106,7 +109,7 @@ impl LanguageBackend for Julia {
 
         let env_dir = hook.env_path().expect("Julia must have env path");
 
-        let mut entry = hook.entry.expect_direct().split()?;
+        let mut entry = hook.entry.expect_argv_entry().split()?;
         if let Some(repo_path) = hook.repo_path() {
             let jl_path = repo_path.join(&entry[0]);
             if jl_path.exists() {
@@ -115,8 +118,9 @@ impl LanguageBackend for Julia {
         }
 
         let run = async |batch: &[&Path]| {
-            let mut output = Cmd::new("julia")
+            let output = Cmd::new("julia")
                 .current_dir(hook.work_dir())
+                .preserve_current_worktree(hook.work_dir())
                 .arg("--startup-file=no")
                 .arg(format!("--project={}", env_dir.display()))
                 .args(&entry)
@@ -130,23 +134,13 @@ impl LanguageBackend for Julia {
 
             reporter.on_run_progress(progress, batch.len() as u64);
 
-            output.stdout.extend(output.stderr);
-            let code = output.status.code().unwrap_or(1);
-            anyhow::Ok((code, output.stdout))
+            anyhow::Ok(output)
         };
 
-        let results = run_by_batch(hook, filenames, &entry, run).await?;
-
-        let mut combined_status = 0;
-        let mut combined_output = Vec::new();
-
-        for (code, output) in results {
-            combined_status |= code;
-            combined_output.extend(output);
-        }
+        let output = run_by_batch(hook, filenames, &entry, run).await?;
 
         reporter.on_run_complete(progress);
 
-        Ok((combined_status, combined_output))
+        Ok(output)
     }
 }

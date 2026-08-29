@@ -1,11 +1,10 @@
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use prek_consts::PRE_COMMIT_HOOKS_YAML;
 use prek_identify::{TagSet, tags};
 use rustc_hash::FxHashMap;
@@ -47,46 +46,59 @@ pub(crate) enum Error {
     TmpDir(#[from] std::io::Error),
 }
 
-/// A hook specification that all hook types can be converted into.
-#[derive(Debug, Clone)]
+/// A source-independent hook declaration.
+///
+/// Project defaults and language metadata are applied only when this value is consumed by
+/// [`Hook::from_spec`].
+#[derive(Debug)]
 pub(crate) struct HookSpec {
-    pub id: String,
-    pub name: String,
-    pub entry: String,
-    pub language: Language,
-    pub priority: Option<config::Priority>,
-    pub groups: Option<Vec<String>>,
-    pub options: HookOptions,
+    id: String,
+    name: String,
+    entry: String,
+    language: Language,
+    language_overridden: bool,
+    priority: Option<config::Priority>,
+    groups: Option<Vec<String>>,
+    options: HookOptions,
 }
 
 impl HookSpec {
-    pub(crate) fn apply_remote_hook_overrides(&mut self, config: &RemoteHook) {
+    pub(crate) fn from_remote(manifest: ManifestHook, config: &RemoteHook) -> Self {
+        let mut spec = Self::from(manifest);
+
         if let Some(name) = &config.name {
-            self.name.clone_from(name);
+            spec.name.clone_from(name);
         }
         if let Some(entry) = &config.entry {
-            self.entry.clone_from(entry);
+            spec.entry.clone_from(entry);
         }
         if let Some(language) = &config.language {
-            self.language.clone_from(language);
+            spec.language.clone_from(language);
+            spec.language_overridden = true;
         }
         if config.priority.is_some() {
-            self.priority.clone_from(&config.priority);
+            spec.priority.clone_from(&config.priority);
         }
         if config.groups.is_some() {
-            self.groups.clone_from(&config.groups);
+            spec.groups.clone_from(&config.groups);
         }
 
-        self.options.update(&config.options);
+        spec.options.update(&config.options);
+        spec
     }
 
-    pub(crate) fn apply_project_defaults(&mut self, config: &Config) {
+    fn with_project_defaults(mut self, config: &Config) -> Self {
         let language = self.language;
-        if self.options.language_version.is_none() {
-            self.options.language_version = config
-                .default_language_version
-                .as_ref()
-                .and_then(|v| v.get(&language).cloned());
+        if let Some(default) = config
+            .default_language_version
+            .as_ref()
+            .and_then(|versions| versions.get(&language))
+        {
+            if let Some(language_version) = &mut self.options.language_version {
+                language_version.apply_defaults(default);
+            } else {
+                self.options.language_version = Some(default.clone());
+            }
         }
 
         if self
@@ -105,6 +117,55 @@ impl HookSpec {
             }
             self.options.env = Some(env);
         }
+
+        self
+    }
+
+    fn validate(&self, repo: &Repo) -> Result<()> {
+        let language = self.language;
+        let additional_dependencies = self
+            .options
+            .additional_dependencies
+            .as_deref()
+            .unwrap_or_default();
+
+        if !additional_dependencies.is_empty() {
+            let dependencies = additional_dependencies.join(", ");
+            if !language.supports_install_env() {
+                bail!(
+                    "Hook specified `additional_dependencies: {dependencies}` but the language `{language}` does not install an environment"
+                );
+            }
+
+            if !language.supports_dependency() {
+                bail!(
+                    "Hook specified `additional_dependencies: {dependencies}` but the language `{language}` does not support installing dependencies for now"
+                );
+            }
+        }
+
+        if !language.supports_language_version()
+            && let Some(language_version) = &self.options.language_version
+            && !language_version.is_default()
+        {
+            bail!(
+                "Hook specified `language_version: {language_version}` but the language `{language}` does not support toolchain installation for now"
+            );
+        }
+
+        if self.options.shell.is_some() {
+            if matches!(repo, Repo::Meta | Repo::Builtin) {
+                bail!("Hook specified `shell` but {repo} hooks do not support shell execution");
+            }
+
+            if let ShellSupport::Unsupported(reason) = language.shell_support() {
+                bail!(
+                    "Hook specified `shell` but the language `{language}` does not support shell execution: {reason}"
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -115,6 +176,7 @@ impl From<ManifestHook> for HookSpec {
             name: hook.name,
             entry: hook.entry,
             language: hook.language,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: hook.options,
@@ -129,6 +191,7 @@ impl From<LocalHook> for HookSpec {
             name: hook.name,
             entry: hook.entry,
             language: hook.language,
+            language_overridden: false,
             priority: hook.priority,
             groups: hook.groups,
             options: hook.options,
@@ -143,6 +206,7 @@ impl From<MetaHook> for HookSpec {
             name: hook.name,
             entry: String::new(),
             language: Language::System,
+            language_overridden: false,
             priority: hook.priority,
             groups: hook.groups,
             options: hook.options,
@@ -157,6 +221,7 @@ impl From<BuiltinHook> for HookSpec {
             name: hook.name,
             entry: hook.entry,
             language: Language::System,
+            language_overridden: false,
             priority: hook.priority,
             groups: hook.groups,
             options: hook.options,
@@ -209,24 +274,18 @@ impl From<RepoIdentityRef<'_>> for RepoIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum Repo {
     Remote {
         /// Path to the cloned repo.
         path: PathBuf,
         url: String,
         rev: String,
-        hooks: Vec<HookSpec>,
+        hooks: Vec<ManifestHook>,
     },
-    Local {
-        hooks: Vec<HookSpec>,
-    },
-    Meta {
-        hooks: Vec<HookSpec>,
-    },
-    Builtin {
-        hooks: Vec<HookSpec>,
-    },
+    Local,
+    Meta,
+    Builtin,
 }
 
 impl Repo {
@@ -237,35 +296,12 @@ impl Repo {
                 repo: url.clone(),
                 error: e,
             })?;
-        let hooks = manifest.hooks.into_iter().map(Into::into).collect();
-
         Ok(Self::Remote {
             path,
             url,
             rev,
-            hooks,
+            hooks: manifest.hooks,
         })
-    }
-
-    /// Construct a local repo from a list of hooks.
-    pub(crate) fn local(hooks: Vec<LocalHook>) -> Self {
-        Self::Local {
-            hooks: hooks.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    /// Construct a meta repo.
-    pub(crate) fn meta(hooks: Vec<MetaHook>) -> Self {
-        Self::Meta {
-            hooks: hooks.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    /// Construct a builtin repo.
-    pub(crate) fn builtin(hooks: Vec<BuiltinHook>) -> Self {
-        Self::Builtin {
-            hooks: hooks.into_iter().map(Into::into).collect(),
-        }
     }
 
     /// Get the path to the cloned repo if it is a remote repo.
@@ -279,17 +315,14 @@ impl Repo {
     pub(crate) fn identity(&self) -> Option<RepoIdentityRef<'_>> {
         match self {
             Repo::Remote { url, rev, .. } => Some(RepoIdentityRef::new(url, rev)),
-            Repo::Local { .. } | Repo::Meta { .. } | Repo::Builtin { .. } => None,
+            Repo::Local | Repo::Meta | Repo::Builtin => None,
         }
     }
 
-    /// Get a hook by id.
-    pub(crate) fn get_hook(&self, id: &str) -> Option<&HookSpec> {
-        let hooks = match self {
-            Repo::Remote { hooks, .. } => hooks,
-            Repo::Local { hooks } => hooks,
-            Repo::Meta { hooks } => hooks,
-            Repo::Builtin { hooks } => hooks,
+    /// Get a hook declaration from a remote repository manifest.
+    pub(crate) fn manifest_hook(&self, id: &str) -> Option<&ManifestHook> {
+        let Self::Remote { hooks, .. } = self else {
+            return None;
         };
         hooks.iter().find(|hook| hook.id == id)
     }
@@ -299,208 +332,27 @@ impl Display for Repo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Repo::Remote { url, rev, .. } => write!(f, "{url}@{rev}"),
-            Repo::Local { .. } => write!(f, "local"),
-            Repo::Meta { .. } => write!(f, "meta"),
-            Repo::Builtin { .. } => write!(f, "builtin"),
+            Repo::Local => write!(f, "local"),
+            Repo::Meta => write!(f, "meta"),
+            Repo::Builtin => write!(f, "builtin"),
         }
     }
 }
 
-pub(crate) struct HookBuilder {
-    project: Arc<Project>,
-    repo: Arc<Repo>,
-    hook_spec: HookSpec,
-    // The index of the hook in the project configuration.
-    idx: usize,
+fn hook_error(hook: &str, error: impl Into<anyhow::Error>) -> Error {
+    Error::Hook {
+        hook: hook.to_string(),
+        error: error.into(),
+    }
 }
 
-impl HookBuilder {
-    pub(crate) fn new(
-        project: Arc<Project>,
-        repo: Arc<Repo>,
-        hook_spec: HookSpec,
-        idx: usize,
-    ) -> Self {
-        Self {
-            project,
-            repo,
-            hook_spec,
-            idx,
-        }
-    }
-
-    /// Check the hook configuration.
-    fn check(&self) -> Result<(), Error> {
-        let language = self.hook_spec.language;
-        let HookOptions {
-            language_version,
-            additional_dependencies,
-            shell,
-            ..
-        } = &self.hook_spec.options;
-        let additional_dependencies = additional_dependencies
-            .as_ref()
-            .map_or(&[][..], |deps| deps.as_slice());
-
-        if !additional_dependencies.is_empty() {
-            if !language.supports_install_env() {
-                return Err(Error::Hook {
-                    hook: self.hook_spec.id.clone(),
-                    error: anyhow::anyhow!(
-                        "Hook specified `additional_dependencies: {}` but the language `{}` does not install an environment",
-                        additional_dependencies.join(", "),
-                        language,
-                    ),
-                });
-            }
-
-            if !language.supports_dependency() {
-                return Err(Error::Hook {
-                    hook: self.hook_spec.id.clone(),
-                    error: anyhow::anyhow!(
-                        "Hook specified `additional_dependencies: {}` but the language `{}` does not support installing dependencies for now",
-                        additional_dependencies.join(", "),
-                        language,
-                    ),
-                });
-            }
-        }
-
-        if !language.supports_language_version() {
-            if let Some(language_version) = language_version
-                && language_version != "default"
-            {
-                return Err(Error::Hook {
-                    hook: self.hook_spec.id.clone(),
-                    error: anyhow::anyhow!(
-                        "Hook specified `language_version: {language_version}` but the language `{language}` does not support toolchain installation for now",
-                    ),
-                });
-            }
-        }
-
-        if shell.is_some() {
-            match self.repo.as_ref() {
-                Repo::Meta { .. } => {
-                    return Err(Error::Hook {
-                        hook: self.hook_spec.id.clone(),
-                        error: anyhow::anyhow!(
-                            "Hook specified `shell` but meta hooks do not support shell execution",
-                        ),
-                    });
-                }
-                Repo::Builtin { .. } => {
-                    return Err(Error::Hook {
-                        hook: self.hook_spec.id.clone(),
-                        error: anyhow::anyhow!(
-                            "Hook specified `shell` but builtin hooks do not support shell execution",
-                        ),
-                    });
-                }
-                Repo::Remote { .. } | Repo::Local { .. } => {}
-            }
-
-            if let ShellSupport::Unsupported(reason) = language.shell_support() {
-                return Err(Error::Hook {
-                    hook: self.hook_spec.id.clone(),
-                    error: anyhow::anyhow!(
-                        "Hook specified `shell` but the language `{language}` does not support shell execution: {reason}",
-                    ),
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Build the hook.
-    pub(crate) async fn build(mut self) -> Result<Hook, Error> {
-        self.hook_spec.apply_project_defaults(self.project.config());
-
-        self.check()?;
-
-        let priority = self
-            .hook_spec
-            .priority
-            .as_ref()
-            .map(|priority| priority.resolve(&self.project.config().priorities, &self.hook_spec.id))
-            .transpose()?
-            .unwrap_or_else(|| u32::try_from(self.idx).expect("idx too large"));
-
-        let groups = self
-            .hook_spec
-            .groups
-            .take()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let options = self.hook_spec.options;
-        let language_version = options.language_version.unwrap_or_default();
-        let alias = options.alias.unwrap_or_default();
-        let args = options.args.unwrap_or_default();
-        let env = options.env.unwrap_or_default();
-        let types = options.types.unwrap_or(tags::TAG_SET_FILE);
-        let types_or = options.types_or.unwrap_or_default();
-        let exclude_types = options.exclude_types.unwrap_or_default();
-        let always_run = options.always_run.unwrap_or(false);
-        let fail_fast = options.fail_fast.unwrap_or(false);
-        let pass_filenames = options.pass_filenames.unwrap_or(PassFilenames::All);
-        let require_serial = options.require_serial.unwrap_or(false);
-        let verbose = options.verbose.unwrap_or(false);
-        let stages = options.stages.unwrap_or(Stages::ALL);
-        let shell = options.shell;
-        let additional_dependencies = options.additional_dependencies.unwrap_or_default();
-        let language_request = LanguageRequest::parse(self.hook_spec.language, &language_version)
-            .map_err(|e| Error::Hook {
-            hook: self.hook_spec.id.clone(),
-            error: anyhow::anyhow!(e),
-        })?;
-
-        let entry = HookEntry::new(self.hook_spec.id.clone(), self.hook_spec.entry, shell);
-
-        let mut hook = Hook {
-            project: self.project,
-            repo: self.repo,
-            idx: self.idx,
-            id: self.hook_spec.id,
-            name: self.hook_spec.name,
-            language: self.hook_spec.language,
-
-            priority,
-            groups,
-            entry,
-            stages,
-            language_request,
-            additional_dependencies,
-            alias,
-            types,
-            types_or,
-            exclude_types,
-            args,
-            env,
-            always_run,
-            fail_fast,
-            pass_filenames,
-            require_serial,
-            verbose,
-            files: options.files,
-            exclude: options.exclude,
-            description: options.description,
-            log_file: options.log_file,
-            minimum_prek_version: options.minimum_prek_version,
-        };
-
-        if let Err(err) = extract_metadata(&mut hook).await {
-            if err
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound)
-            {
-                trace!("Failed to extract metadata from entry for hook `{hook}`: {err}");
-            }
-        }
-
-        Ok(hook)
-    }
+/// Workspace-local identity of a configured hook.
+///
+/// Hook indexes are scoped to a project config, so the project index is part of the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct HookKey {
+    pub(crate) project_idx: usize,
+    pub(crate) hook_idx: usize,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -515,6 +367,7 @@ pub(crate) struct Hook {
     pub name: String,
     pub entry: HookEntry,
     pub language: Language,
+    pub(crate) language_overridden: bool,
     pub alias: String,
     pub files: Option<FilePattern>,
     pub exclude: Option<FilePattern>,
@@ -549,8 +402,118 @@ impl Display for Hook {
 }
 
 impl Hook {
+    /// Resolve a merged hook specification into an executable hook.
+    pub(crate) async fn from_spec(
+        project: Arc<Project>,
+        repo: Arc<Repo>,
+        hook_spec: HookSpec,
+        idx: usize,
+    ) -> Result<Self, Error> {
+        let hook_spec = hook_spec.with_project_defaults(project.config());
+        hook_spec
+            .validate(&repo)
+            .map_err(|error| hook_error(&hook_spec.id, error))?;
+
+        let HookSpec {
+            id,
+            name,
+            entry: raw_entry,
+            language,
+            language_overridden,
+            priority,
+            groups,
+            options,
+        } = hook_spec;
+
+        let priority = match priority {
+            Some(priority) => priority.resolve(&project.config().priorities, &id)?,
+            None => u32::try_from(idx).expect("hook index should fit in u32"),
+        };
+        let groups = groups
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        let HookOptions {
+            alias,
+            files,
+            exclude,
+            types,
+            types_or,
+            exclude_types,
+            additional_dependencies,
+            args,
+            env,
+            always_run,
+            fail_fast,
+            pass_filenames,
+            description,
+            language_version,
+            log_file,
+            shell,
+            require_serial,
+            stages,
+            verbose,
+            minimum_prek_version,
+            _unused_keys: _,
+        } = options;
+
+        let language_request = LanguageRequest::from_config(language, language_version.as_ref())
+            .map_err(|error| hook_error(&id, error))?;
+        let entry = HookEntry::new(id.clone(), raw_entry, shell);
+
+        let mut hook = Self {
+            project,
+            repo,
+            idx,
+            id,
+            name,
+            entry,
+            language,
+            language_overridden,
+            alias: alias.unwrap_or_default(),
+            files,
+            exclude,
+            types: types.unwrap_or(tags::TAG_SET_FILE),
+            types_or: types_or.unwrap_or_default(),
+            exclude_types: exclude_types.unwrap_or_default(),
+            additional_dependencies: additional_dependencies.unwrap_or_default(),
+            args: args.unwrap_or_default(),
+            env: env.unwrap_or_default(),
+            always_run: always_run.unwrap_or(false),
+            fail_fast: fail_fast.unwrap_or(false),
+            pass_filenames: pass_filenames.unwrap_or(PassFilenames::All),
+            description,
+            language_request,
+            log_file,
+            require_serial: require_serial.unwrap_or(false),
+            stages: stages.unwrap_or(Stages::ALL),
+            verbose: verbose.unwrap_or(false),
+            minimum_prek_version,
+            priority,
+            groups,
+        };
+
+        if let Err(err) = extract_metadata(&mut hook).await
+            && err
+                .downcast_ref::<std::io::Error>()
+                .is_none_or(|error| error.kind() != std::io::ErrorKind::NotFound)
+        {
+            trace!("Failed to extract metadata from entry for hook `{hook}`: {err}");
+        }
+
+        Ok(hook)
+    }
+
     pub(crate) fn project(&self) -> &Project {
         &self.project
+    }
+
+    pub(crate) fn key(&self) -> HookKey {
+        HookKey {
+            project_idx: self.project.idx(),
+            hook_idx: self.idx,
+        }
     }
 
     pub(crate) fn repo(&self) -> &Repo {
@@ -577,8 +540,7 @@ impl Hook {
     }
 
     pub(crate) fn needs_install_env(&self) -> bool {
-        !matches!(self.repo(), Repo::Meta { .. } | Repo::Builtin { .. })
-            && self.language.supports_install_env()
+        !matches!(self.repo(), Repo::Meta | Repo::Builtin) && self.language.supports_install_env()
     }
 
     /// Returns a lightweight view of the hook's environment requirement.
@@ -596,24 +558,9 @@ impl Hook {
             language_request: &self.language_request,
         })
     }
-
-    /// Dependencies to pass to language dependency installers.
-    ///
-    /// For remote hooks, this includes the local path to the cloned repository so that
-    /// installers can install the hook's package/project itself.
-    pub(crate) fn install_dependencies(&self) -> Cow<'_, [String]> {
-        if let Some(repo_path) = self.repo_path() {
-            let mut deps = Vec::with_capacity(self.additional_dependencies.len() + 1);
-            deps.push(repo_path.to_string_lossy().into_owned());
-            deps.extend(self.additional_dependencies.iter().cloned());
-            Cow::Owned(deps)
-        } else {
-            Cow::Borrowed(&self.additional_dependencies)
-        }
-    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct HookEnvRequirement {
     pub(crate) language: Language,
     repo: Option<RepoIdentity>,
@@ -637,35 +584,22 @@ impl HookEnvRequirement {
     /// Returns `Ok(None)` if this hook does not install an environment.
     pub(crate) fn from_hook_spec(
         config: &Config,
-        mut hook_spec: HookSpec,
+        hook_spec: HookSpec,
         repo: Option<RepoIdentityRef<'_>>,
     ) -> Result<Option<Self>> {
+        let hook_spec = hook_spec.with_project_defaults(config);
         let language = hook_spec.language;
         if !language.supports_install_env() {
             return Ok(None);
         }
 
-        hook_spec.apply_project_defaults(config);
-        hook_spec.options.language_version.get_or_insert_default();
-        hook_spec
-            .options
-            .additional_dependencies
-            .get_or_insert_default();
-
-        let request = hook_spec.options.language_version.as_deref().unwrap_or("");
-        let language_request = LanguageRequest::parse(language, request).with_context(|| {
-            format!(
-                "Invalid language_version `{request}` for hook `{}`",
-                hook_spec.id
-            )
-        })?;
-
+        let language_request =
+            LanguageRequest::from_config(language, hook_spec.options.language_version.as_ref())
+                .with_context(|| format!("Invalid language_version for hook `{}`", hook_spec.id))?;
         let dependencies = hook_spec
             .options
             .additional_dependencies
-            .as_deref()
-            .unwrap_or_default()
-            .to_vec();
+            .unwrap_or_default();
 
         Ok(Some(Self {
             language,
@@ -770,7 +704,6 @@ impl InstalledHook {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct InstallInfo {
-    #[serde(default)]
     schema_version: u8,
     pub(crate) language: Language,
     pub(crate) language_version: semver::Version,
@@ -844,10 +777,6 @@ impl InstallInfo {
         self.schema_version == INSTALL_INFO_SCHEMA_VERSION
     }
 
-    pub(crate) fn schema_version(&self) -> u8 {
-        self.schema_version
-    }
-
     pub(crate) fn repo(&self) -> Option<RepoIdentityRef<'_>> {
         self.repo.as_ref().map(RepoIdentity::as_ref)
     }
@@ -896,19 +825,21 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{
-        Config, HookOptions, Language, PassFilenames, Priority, RemoteHook, Shell, Stage, Stages,
+        Config, HookOptions, Language, LanguageVersion, ManifestHook, PassFilenames, Priority,
+        RemoteHook, Shell, Stage, Stages,
     };
     use crate::hook::HookSpec;
+    use crate::hooks::check_fast_path;
     use crate::languages::version::LanguageRequest;
     use crate::workspace::Project;
 
     use super::{
-        Hook, HookBuilder, HookEnvRequirementRef, INSTALL_INFO_SCHEMA_VERSION, InstallInfo, Repo,
+        Hook, HookEnvRequirementRef, INSTALL_INFO_SCHEMA_VERSION, InstallInfo, Repo,
         RepoIdentityRef,
     };
 
     #[tokio::test]
-    async fn hook_builder_build_fills_and_merges_attributes() -> Result<()> {
+    async fn hook_from_spec_fills_and_merges_attributes() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
 
@@ -931,19 +862,17 @@ mod tests {
             Cow::Borrowed(&config_path),
             None,
         )?);
-        let repo = Arc::new(Repo::Local { hooks: vec![] });
+        let repo = Arc::new(Repo::Local);
 
         // Base hook spec (e.g. from a manifest): options that config can merge or override.
         let mut base_env = FxHashMap::default();
         base_env.insert("BASE".to_string(), "1".to_string());
 
-        let mut hook_spec = HookSpec {
+        let manifest_hook = ManifestHook {
             id: "test-hook".to_string(),
             name: "original-name".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
-            priority: None,
-            groups: None,
             options: HookOptions {
                 env: Some(base_env),
                 shell: Some(Shell::Sh),
@@ -976,11 +905,8 @@ mod tests {
             },
         };
 
-        hook_spec.apply_remote_hook_overrides(&hook_override);
-        hook_spec.apply_project_defaults(project.config());
-
-        let builder = HookBuilder::new(project.clone(), repo, hook_spec, 7);
-        let hook = builder.build().await?;
+        let hook_spec = HookSpec::from_remote(manifest_hook, &hook_override);
+        let hook = Hook::from_spec(project.clone(), repo, hook_spec, 7).await?;
 
         insta::assert_debug_snapshot!(hook, @r#"
         Hook {
@@ -994,7 +920,13 @@ mod tests {
                     default_install_hook_types: None,
                     default_language_version: Some(
                         {
-                            Python: "python3.12",
+                            Python: LanguageVersion {
+                                request: Explicit(
+                                    "python3.12",
+                                ),
+                                preference: None,
+                                allows_download: true,
+                            },
                         },
                     ),
                     default_stages: Some(
@@ -1016,9 +948,7 @@ mod tests {
                 },
                 ..
             },
-            repo: Local {
-                hooks: [],
-            },
+            repo: Local,
             idx: 7,
             id: "test-hook",
             name: "override-name",
@@ -1030,6 +960,7 @@ mod tests {
                 },
             ),
             language: Python,
+            language_overridden: false,
             alias: "alias-1",
             files: None,
             exclude: None,
@@ -1053,12 +984,16 @@ mod tests {
             description: Some(
                 "desc",
             ),
-            language_request: Python(
-                MajorMinor(
-                    3,
-                    12,
+            language_request: LanguageRequest {
+                version: Python(
+                    MajorMinor(
+                        3,
+                        12,
+                    ),
                 ),
-            ),
+                preference: Managed,
+                allows_download: true,
+            },
             log_file: None,
             require_serial: false,
             stages: Stages(manual),
@@ -1076,7 +1011,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_builder_empty_hook_stages_inherit_default_stages() -> Result<()> {
+    async fn explicit_language_override_uses_pinned_remote_hook() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
+        let repo = Arc::new(Repo::Remote {
+            path: temp.path().join("remote-repo"),
+            url: "https://github.com/pre-commit/pre-commit-hooks".to_string(),
+            rev: "v6.0.0".to_string(),
+            hooks: vec![],
+        });
+        let manifest_hook = ManifestHook {
+            id: "check-yaml".to_string(),
+            name: "check yaml".to_string(),
+            entry: "check-yaml".to_string(),
+            language: Language::Python,
+            options: HookOptions::default(),
+        };
+        let hook_override = RemoteHook {
+            id: "check-yaml".to_string(),
+            name: None,
+            entry: None,
+            language: Some(Language::Python),
+            priority: None,
+            groups: None,
+            options: HookOptions::default(),
+        };
+
+        let hook_spec = HookSpec::from_remote(manifest_hook, &hook_override);
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
+
+        assert!(!check_fast_path(&hook));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hook_from_spec_empty_hook_stages_inherit_default_stages() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
         fs_err::write(&config_path, "repos: []\ndefault_stages: [manual]\n")?;
@@ -1085,13 +1053,14 @@ mod tests {
             Cow::Borrowed(&config_path),
             None,
         )?);
-        let repo = Arc::new(Repo::Local { hooks: vec![] });
+        let repo = Arc::new(Repo::Local);
 
         let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions {
@@ -1100,35 +1069,69 @@ mod tests {
             },
         };
 
-        let hook = HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?;
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
 
         assert_eq!(hook.stages, Stages::from([Stage::Manual]));
         Ok(())
     }
 
     #[test]
-    fn hook_spec_apply_project_defaults_sets_explicit_all_when_default_stages_missing() {
+    fn hook_spec_with_project_defaults_sets_explicit_all_when_default_stages_missing() {
         let config: Config = serde_saphyr::from_str("repos: []\n").expect("config should parse");
 
-        let mut hook_spec = HookSpec {
+        let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions::default(),
         };
 
-        hook_spec.apply_project_defaults(&config);
+        let hook_spec = hook_spec.with_project_defaults(&config);
 
         assert_eq!(hook_spec.options.stages, Some(Stages::ALL));
     }
 
+    #[test]
+    fn hook_spec_with_project_defaults_merges_language_version_fields() {
+        let config: Config = serde_saphyr::from_str(indoc::indoc! {r"
+            repos: []
+            default_language_version:
+              python:
+                request: '3.12'
+                preference: only-managed
+        "})
+        .expect("config should parse");
+        let language_version: LanguageVersion =
+            serde_saphyr::from_str("preference: system\n").expect("version should parse");
+        let hook_spec = HookSpec {
+            id: "test-hook".to_string(),
+            name: "test-hook".to_string(),
+            entry: "python -m test".to_string(),
+            language: Language::Python,
+            language_overridden: false,
+            priority: None,
+            groups: None,
+            options: HookOptions {
+                language_version: Some(language_version),
+                ..Default::default()
+            },
+        }
+        .with_project_defaults(&config);
+
+        let language_version = hook_spec.options.language_version.as_ref().unwrap();
+        assert_eq!(language_version.request(), Some("3.12"));
+        assert_eq!(
+            language_version.preference(),
+            crate::config::ToolchainPreference::System
+        );
+    }
+
     #[tokio::test]
-    async fn hook_builder_preserves_explicit_empty_default_stages() -> Result<()> {
+    async fn hook_from_spec_preserves_explicit_empty_default_stages() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
         fs_err::write(&config_path, "repos: []\ndefault_stages: []\n")?;
@@ -1137,28 +1140,27 @@ mod tests {
             Cow::Borrowed(&config_path),
             None,
         )?);
-        let repo = Arc::new(Repo::Local { hooks: vec![] });
+        let repo = Arc::new(Repo::Local);
 
         let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions::default(),
         };
 
-        let hook = HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?;
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
 
         assert_eq!(hook.stages, Stages::from([]));
         Ok(())
     }
 
     #[tokio::test]
-    async fn hook_builder_defaults_to_all_when_stages_and_default_stages_missing() -> Result<()> {
+    async fn hook_from_spec_defaults_to_all_when_stages_and_default_stages_missing() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
         fs_err::write(&config_path, "repos: []\n")?;
@@ -1167,28 +1169,27 @@ mod tests {
             Cow::Borrowed(&config_path),
             None,
         )?);
-        let repo = Arc::new(Repo::Local { hooks: vec![] });
+        let repo = Arc::new(Repo::Local);
 
         let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions::default(),
         };
 
-        let hook = HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?;
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
 
         assert_eq!(hook.stages, Stages::ALL);
         Ok(())
     }
 
     #[tokio::test]
-    async fn hook_builder_empty_hook_stages_default_to_all_when_default_stages_missing()
+    async fn hook_from_spec_empty_hook_stages_default_to_all_when_default_stages_missing()
     -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
@@ -1198,13 +1199,14 @@ mod tests {
             Cow::Borrowed(&config_path),
             None,
         )?);
-        let repo = Arc::new(Repo::Local { hooks: vec![] });
+        let repo = Arc::new(Repo::Local);
 
         let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
             entry: "python3 -c 'print(1)'".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions {
@@ -1213,17 +1215,15 @@ mod tests {
             },
         };
 
-        let hook = HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?;
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
 
         assert_eq!(hook.stages, Stages::ALL);
         Ok(())
     }
 
     #[tokio::test]
-    async fn hook_builder_preserves_additional_dependency_order() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_preserves_additional_dependency_order() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         let repo = Arc::new(Repo::Remote {
             path: repo_path.clone(),
@@ -1243,6 +1243,7 @@ mod tests {
             name: "test-hook".to_string(),
             entry: "./hook.py".to_string(),
             language: Language::Python,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions {
@@ -1251,28 +1252,19 @@ mod tests {
             },
         };
 
-        let hook = HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?;
-        let install_dependencies = hook.install_dependencies();
-        let mut expected_install_dependencies = vec![repo_path.to_string_lossy().into_owned()];
-        expected_install_dependencies.extend(additional_dependencies.iter().cloned());
+        let hook = Hook::from_spec(project, repo, hook_spec, 0).await?;
         let requirement = hook
             .environment_requirement()
             .expect("Python hook installs an environment");
 
         assert_eq!(hook.additional_dependencies, additional_dependencies);
-        assert_eq!(
-            install_dependencies.as_ref(),
-            expected_install_dependencies.as_slice()
-        );
         assert_eq!(requirement.repo, Some(repo_identity));
         assert_eq!(requirement.dependencies, additional_dependencies);
 
         let hooks_dir = temp.path().join("hooks");
         fs_err::create_dir(&hooks_dir)?;
         let install_info = InstallInfo::new(&hook, &hooks_dir)?;
-        assert_eq!(install_info.schema_version(), INSTALL_INFO_SCHEMA_VERSION);
+        assert!(install_info.is_current_schema());
         assert_eq!(install_info.repo(), Some(repo_identity));
         assert_eq!(install_info.dependencies, additional_dependencies);
         assert!(requirement.is_satisfied_by(&install_info));
@@ -1290,27 +1282,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_install_info_does_not_satisfy_current_requirement() -> Result<()> {
-        let install_info: InstallInfo = serde_json::from_value(json!({
+    fn install_info_requires_schema_version() {
+        let err = serde_json::from_value::<InstallInfo>(json!({
             "language": "python",
             "language_version": "3.12.0",
             "dependencies": ["dep"],
             "env_path": "/tmp/legacy-env",
             "toolchain": "/usr/bin/python3",
             "extra": {},
-        }))?;
-        let dependencies = vec!["dep".to_string()];
-        let language_request = LanguageRequest::parse(Language::Python, "")?;
-        let requirement = HookEnvRequirementRef {
-            language: Language::Python,
-            repo: None,
-            dependencies: &dependencies,
-            language_request: &language_request,
-        };
+        }))
+        .unwrap_err();
 
-        assert_eq!(install_info.schema_version(), 0);
-        assert!(!requirement.is_satisfied_by(&install_info));
-        Ok(())
+        assert_eq!(err.to_string(), "missing field `schema_version`");
     }
 
     #[test]
@@ -1348,9 +1331,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn toolchain_preferences_do_not_affect_existing_environment_reuse() -> Result<()> {
+        let dependencies = Vec::new();
+        let install_info: InstallInfo = serde_json::from_value(json!({
+            "schema_version": INSTALL_INFO_SCHEMA_VERSION,
+            "language": "python",
+            "language_version": "3.12.0",
+            "dependencies": [],
+            "env_path": "/tmp/python-env",
+            "toolchain": "/usr/bin/python3",
+            "extra": {},
+        }))?;
+
+        for preference in ["only-managed", "managed", "system", "only-system"] {
+            let language_version: LanguageVersion =
+                serde_saphyr::from_str(&format!("preference: {preference}\n"))?;
+            let language_request =
+                LanguageRequest::from_config(Language::Python, Some(&language_version))?;
+            let requirement = HookEnvRequirementRef {
+                language: Language::Python,
+                repo: None,
+                dependencies: &dependencies,
+                language_request: &language_request,
+            };
+
+            assert!(requirement.is_satisfied_by(&install_info), "{preference}");
+        }
+        Ok(())
+    }
+
     /// Set up a temporary directory with a minimal `.pre-commit-config.yaml`
     /// and a `remote-repo` subdirectory.
-    fn setup_python_hook_test() -> Result<(tempfile::TempDir, Arc<Project>)> {
+    fn setup_hook_test() -> Result<(tempfile::TempDir, Arc<Project>)> {
         let temp = tempfile::tempdir()?;
         let config_path = temp.path().join(PRE_COMMIT_CONFIG_YAML);
         fs_err::write(&config_path, "repos: []\n")?;
@@ -1366,10 +1379,12 @@ mod tests {
         Ok((temp, project))
     }
 
-    /// Build a hook from the given repo path and options via `HookBuilder`.
-    async fn build_python_hook(
+    /// Build a hook from the given repo path and options.
+    async fn build_hook(
         project: Arc<Project>,
         repo_path: PathBuf,
+        language: Language,
+        entry: &str,
         language_version: Option<&str>,
     ) -> Result<Hook> {
         let repo = Arc::new(Repo::Remote {
@@ -1382,19 +1397,33 @@ mod tests {
         let hook_spec = HookSpec {
             id: "test-hook".to_string(),
             name: "test-hook".to_string(),
-            entry: "./hook.py".to_string(),
-            language: Language::Python,
+            entry: entry.to_string(),
+            language,
+            language_overridden: false,
             priority: None,
             groups: None,
             options: HookOptions {
-                language_version: language_version.map(str::to_string),
+                language_version: language_version.map(LanguageVersion::from),
                 ..Default::default()
             },
         };
 
-        Ok(HookBuilder::new(project, repo, hook_spec, 0)
-            .build()
-            .await?)
+        Ok(Hook::from_spec(project, repo, hook_spec, 0).await?)
+    }
+
+    async fn build_python_hook(
+        project: Arc<Project>,
+        repo_path: PathBuf,
+        language_version: Option<&str>,
+    ) -> Result<Hook> {
+        build_hook(
+            project,
+            repo_path,
+            Language::Python,
+            "./hook.py",
+            language_version,
+        )
+        .await
     }
 
     static PEP723_SCRIPT: &str = indoc::indoc! {r#"
@@ -1405,8 +1434,8 @@ mod tests {
     "#};
 
     #[tokio::test]
-    async fn hook_builder_python_pep723_overrides_user_and_pyproject() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_python_pep723_overrides_user_and_pyproject() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         fs_err::write(
             repo_path.join("pyproject.toml"),
@@ -1424,8 +1453,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_builder_python_user_language_version_overrides_pyproject() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_python_user_language_version_overrides_pyproject() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         fs_err::write(
             repo_path.join("pyproject.toml"),
@@ -1443,8 +1472,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_builder_python_pep723_overrides_pyproject_without_user_version() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_python_pep723_overrides_pyproject_without_user_version() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         fs_err::write(
             repo_path.join("pyproject.toml"),
@@ -1462,8 +1491,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_builder_python_defaults_to_any_without_version_sources() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_python_metadata_refines_system_without_enabling_downloads() -> Result<()>
+    {
+        let (temp, project) = setup_hook_test()?;
+        let repo_path = temp.path().join("remote-repo");
+        fs_err::write(
+            repo_path.join("pyproject.toml"),
+            "[project]\nrequires-python = \">=3.8\"\n",
+        )?;
+        fs_err::write(repo_path.join("hook.py"), PEP723_SCRIPT)?;
+
+        let hook = build_python_hook(project, repo_path, Some("system")).await?;
+        let expected = LanguageRequest::parse(Language::Python, ">=3.11")?;
+
+        assert_eq!(
+            hook.language_request.version_request(),
+            expected.version_request()
+        );
+        assert!(!hook.language_request.toolchain_policy().allows_download());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hook_from_spec_python_defaults_to_any_without_version_sources() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         fs_err::write(repo_path.join("hook.py"), "print(\"hello\")\n")?;
 
@@ -1474,8 +1525,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_builder_python_pyproject_provides_version_when_no_other_source() -> Result<()> {
-        let (temp, project) = setup_python_hook_test()?;
+    async fn hook_from_spec_python_pyproject_provides_version_when_no_other_source() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
         let repo_path = temp.path().join("remote-repo");
         fs_err::write(
             repo_path.join("pyproject.toml"),
@@ -1489,6 +1540,33 @@ mod tests {
             hook.language_request,
             LanguageRequest::parse(Language::Python, ">=3.10")?
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hook_from_spec_go_mod_refines_system_without_enabling_downloads() -> Result<()> {
+        let (temp, project) = setup_hook_test()?;
+        let repo_path = temp.path().join("remote-repo");
+        fs_err::write(
+            repo_path.join("go.mod"),
+            "module example.com/test-hook\n\ngo 1.22\n",
+        )?;
+
+        let hook = build_hook(
+            project,
+            repo_path,
+            Language::Golang,
+            "go test",
+            Some("system"),
+        )
+        .await?;
+        let expected = LanguageRequest::parse(Language::Golang, ">= 1.22.0")?;
+
+        assert_eq!(
+            hook.language_request.version_request(),
+            expected.version_request()
+        );
+        assert!(!hook.language_request.toolchain_policy().allows_download());
         Ok(())
     }
 }

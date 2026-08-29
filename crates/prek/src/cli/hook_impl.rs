@@ -11,7 +11,7 @@ use owo_colors::OwoColorize;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::cli::{self, ExitStatus, RunOptions, flag};
+use crate::cli::{self, ExitStatus, RunArgs, RunOptions};
 use crate::config::HookType;
 use crate::fs::CWD;
 use crate::git::GIT_ROOT;
@@ -115,29 +115,21 @@ pub(crate) async fn hook_impl(
         );
     }
 
-    let Some(run_args) = to_run_args(hook_type, &args, &stdin).await? else {
+    let Some(mut run_args) = to_run_args(hook_type, &args, &stdin).await? else {
         return Ok(legacy_code.into());
     };
+    run_args.includes = includes;
+    run_args.skips = skips;
 
     let status = cli::run(
         store,
         config,
-        includes,
-        skips,
-        vec![],
-        vec![],
-        Some(hook_type.into()),
-        run_args.from_ref,
-        run_args.to_ref,
-        run_args.all_files,
-        vec![],
-        vec![],
+        RunArgs {
+            options: run_args,
+            stage: Some(hook_type.into()),
+            ..RunArgs::default()
+        },
         false,
-        false,
-        flag(run_args.fail_fast, run_args.no_fail_fast),
-        false,
-        false,
-        run_args.extra,
         false,
         printer,
     )
@@ -218,7 +210,7 @@ async fn run_legacy(
         return Ok(0);
     }
 
-    let entry = resolve_command(vec![legacy_hook.into_os_string()], None);
+    let entry = resolve_command(vec![legacy_hook.into_os_string()], None, &CWD);
     let mut cmd = Cmd::new(&entry[0]);
     cmd.check(false).args(&entry[1..]).args(args);
     cmd.env(EnvVars::PREK_RUNNING_LEGACY, "1");
@@ -254,9 +246,9 @@ async fn to_run_args(
             run_args.extra.remote_url = Some(args[1].to_string_lossy().into_owned());
 
             if let Some(push_info) = parse_pre_push_info(&args[0].to_string_lossy(), stdin).await? {
-                run_args.from_ref = push_info.from_ref;
-                run_args.to_ref = push_info.to_ref;
-                run_args.all_files = push_info.all_files;
+                run_args.file_selection.from_ref = push_info.from_ref;
+                run_args.file_selection.to_ref = push_info.to_ref;
+                run_args.file_selection.all_files = push_info.all_files;
                 run_args.extra.remote_branch = push_info.remote_branch;
                 run_args.extra.local_branch = push_info.local_branch;
             } else {
@@ -278,8 +270,8 @@ async fn to_run_args(
             }
         }
         HookType::PostCheckout => {
-            run_args.from_ref = Some(args[0].to_string_lossy().into_owned());
-            run_args.to_ref = Some(args[1].to_string_lossy().into_owned());
+            run_args.file_selection.from_ref = Some(args[0].to_string_lossy().into_owned());
+            run_args.file_selection.to_ref = Some(args[1].to_string_lossy().into_owned());
             run_args.extra.checkout_type = Some(args[2].to_string_lossy().into_owned());
         }
         HookType::PostMerge => run_args.extra.is_squash_merge = args[0] == "1",
@@ -348,7 +340,7 @@ async fn parse_pre_push_info(remote_name: &str, stdin: &[u8]) -> Result<Option<P
 
         // New remote ref, missing old remote object, or rebased force-push: find the
         // commits reachable from the local tip that this remote cannot already reach.
-        let ancestors = git::get_ancestors_not_in_remote(local_sha, remote_name).await?;
+        let ancestors = git::ancestors_not_in_remote(local_sha, remote_name).await?;
         if ancestors.is_empty() {
             // The local tip is already reachable from the remote, so this line does
             // not introduce files that need pre-push checks.
@@ -356,7 +348,7 @@ async fn parse_pre_push_info(remote_name: &str, stdin: &[u8]) -> Result<Option<P
         }
 
         let first_ancestor = &ancestors[0];
-        let roots = git::get_root_commits(local_sha).await?;
+        let roots = git::root_commits(local_sha).await?;
 
         if roots.contains(first_ancestor) {
             // The first commit being pushed is a root commit. There is no parent to
@@ -373,7 +365,7 @@ async fn parse_pre_push_info(remote_name: &str, stdin: &[u8]) -> Result<Option<P
         // Use the parent of the first remote-unknown commit as the diff base. For
         // rebased force-pushes, this usually resolves to the updated default branch
         // base, matching the files a pull request would show.
-        if let Some(source) = git::get_parent_commit(first_ancestor).await? {
+        if let Some(source) = git::parent_commit(first_ancestor).await? {
             return Ok(Some(PushInfo {
                 from_ref: Some(source),
                 to_ref: Some(local_sha.to_string()),

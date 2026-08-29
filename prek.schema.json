@@ -38,76 +38,79 @@
       "type": "object",
       "properties": {
         "bun": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "conda": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "coursier": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "dart": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "deno": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "docker": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "docker_image": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "dotnet": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "fail": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "golang": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "haskell": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "julia": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "lua": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
+        },
+        "mise": {
+          "$ref": "#/definitions/LanguageVersion"
         },
         "node": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "perl": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "php": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "pygrep": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "python": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "r": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "ruby": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "rust": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "script": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "swift": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         },
         "system": {
-          "type": "string"
+          "$ref": "#/definitions/LanguageVersion"
         }
       },
       "additionalProperties": false
@@ -146,10 +149,6 @@
     "orphan": {
       "description": "Set to true to isolate this project from parent configurations in workspace mode.\nWhen true, files in this project are \"consumed\" by this project and will not be processed\nby parent projects.\nWhen false (default), files in subprojects are processed by both the subproject and\nany parent projects that contain them.",
       "type": "boolean"
-    },
-    "auto_update": {
-      "description": "Compatibility alias for `update`. Prefer `update` in new configs.",
-      "$ref": "#/definitions/UpdateOptions"
     }
   },
   "required": [
@@ -286,11 +285,11 @@
           "$ref": "#/definitions/Priority"
         },
         "groups": {
-          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty or contain whitespace.",
+          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty, contain whitespace, or start with `@`.",
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^\\S+$"
+            "pattern": "^[^@\\s]\\S*$"
           }
         },
         "alias": {
@@ -363,12 +362,12 @@
           "$ref": "#/definitions/PassFilenames"
         },
         "description": {
-          "description": "A description of the hook. For metadata only.",
+          "description": "A description of the hook.",
           "type": "string"
         },
         "language_version": {
-          "description": "Run the hook on a specific version of the language.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
-          "type": "string"
+          "description": "Select a language version and optionally configure the toolchain source preference.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
+          "$ref": "#/definitions/LanguageVersion"
         },
         "log_file": {
           "description": "Write the output of the hook to a file when the hook fails or verbose is enabled.",
@@ -401,8 +400,7 @@
       },
       "required": [
         "id"
-      ],
-      "additionalProperties": true
+      ]
     },
     "Language": {
       "type": "string",
@@ -420,6 +418,7 @@
         "haskell",
         "julia",
         "lua",
+        "mise",
         "node",
         "perl",
         "php",
@@ -490,6 +489,36 @@
           "type": "integer",
           "exclusiveMinimum": 0
         }
+      ]
+    },
+    "LanguageVersion": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "request": {
+              "description": "A language-specific version request. Defaults to `default`.",
+              "type": "string"
+            },
+            "preference": {
+              "description": "Which toolchain sources to prefer or require. Defaults to `managed`.",
+              "$ref": "#/definitions/ToolchainPreference"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ToolchainPreference": {
+      "type": "string",
+      "enum": [
+        "only-managed",
+        "managed",
+        "system",
+        "only-system"
       ]
     },
     "Shell": {
@@ -566,11 +595,11 @@
           "$ref": "#/definitions/Priority"
         },
         "groups": {
-          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty or contain whitespace.",
+          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty, contain whitespace, or start with `@`.",
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^\\S+$"
+            "pattern": "^[^@\\s]\\S*$"
           }
         },
         "alias": {
@@ -643,12 +672,12 @@
           "$ref": "#/definitions/PassFilenames"
         },
         "description": {
-          "description": "A description of the hook. For metadata only.",
+          "description": "A description of the hook.",
           "type": "string"
         },
         "language_version": {
-          "description": "Run the hook on a specific version of the language.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
-          "type": "string"
+          "description": "Select a language version and optionally configure the toolchain source preference.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
+          "$ref": "#/definitions/LanguageVersion"
         },
         "log_file": {
           "description": "Write the output of the hook to a file when the hook fails or verbose is enabled.",
@@ -684,8 +713,7 @@
         "name",
         "entry",
         "language"
-      ],
-      "additionalProperties": true
+      ]
     },
     "MetaRepo": {
       "type": "object",
@@ -736,11 +764,11 @@
           "$ref": "#/definitions/Priority"
         },
         "groups": {
-          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty or contain whitespace.",
+          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty, contain whitespace, or start with `@`.",
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^\\S+$"
+            "pattern": "^[^@\\s]\\S*$"
           }
         },
         "alias": {
@@ -813,12 +841,12 @@
           "$ref": "#/definitions/PassFilenames"
         },
         "description": {
-          "description": "A description of the hook. For metadata only.",
+          "description": "A description of the hook.",
           "type": "string"
         },
         "language_version": {
-          "description": "Run the hook on a specific version of the language.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
-          "type": "string"
+          "description": "Select a language version and optionally configure the toolchain source preference.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
+          "$ref": "#/definitions/LanguageVersion"
         },
         "log_file": {
           "description": "Write the output of the hook to a file when the hook fails or verbose is enabled.",
@@ -851,8 +879,7 @@
       },
       "required": [
         "id"
-      ],
-      "additionalProperties": true
+      ]
     },
     "MetaHooks": {
       "type": "string",
@@ -911,11 +938,11 @@
           "$ref": "#/definitions/Priority"
         },
         "groups": {
-          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty or contain whitespace.",
+          "description": "User-defined hook groups used by `prek run --group` and `--no-group`.\nGroup names cannot be empty, contain whitespace, or start with `@`.",
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^\\S+$"
+            "pattern": "^[^@\\s]\\S*$"
           }
         },
         "alias": {
@@ -988,12 +1015,12 @@
           "$ref": "#/definitions/PassFilenames"
         },
         "description": {
-          "description": "A description of the hook. For metadata only.",
+          "description": "A description of the hook.",
           "type": "string"
         },
         "language_version": {
-          "description": "Run the hook on a specific version of the language.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
-          "type": "string"
+          "description": "Select a language version and optionally configure the toolchain source preference.\nDefault is `default`.\nSee <https://pre-commit.com/#overriding-language-version>.",
+          "$ref": "#/definitions/LanguageVersion"
         },
         "log_file": {
           "description": "Write the output of the hook to a file when the hook fails or verbose is enabled.",
@@ -1026,8 +1053,7 @@
       },
       "required": [
         "id"
-      ],
-      "additionalProperties": true
+      ]
     },
     "BuiltinHooks": {
       "type": "string",
@@ -1045,6 +1071,7 @@
         "check-vcs-permalinks",
         "check-xml",
         "check-yaml",
+        "deny-filename-pattern",
         "deny-pattern",
         "destroyed-symlinks",
         "detect-private-key",
@@ -1055,7 +1082,9 @@
         "mixed-line-ending",
         "no-commit-to-branch",
         "pretty-format-json",
+        "require-filename-pattern",
         "require-pattern",
+        "requirements-txt-fixer",
         "trailing-whitespace"
       ]
     },

@@ -1,8 +1,65 @@
+use assert_cmd::assert::OutputAssertExt;
 use assert_fs::assert::PathAssert;
 use assert_fs::fixture::{FileWriteStr, PathChild, PathCreateDir};
+use prek_consts::PRE_COMMIT_HOOKS_YAML;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+use url::Url;
 
-use crate::common::{TestContext, cmd_snapshot, make_executable, remove_bin_from_path};
+use crate::common::{TestEnv, cmd_snapshot, make_executable, remove_bin_from_path};
+
+#[test]
+fn exec_uses_installed_node_environment() -> anyhow::Result<()> {
+    let context = TestEnv::new_git()
+        .with_file(
+            "node-env-tool/package.json",
+            indoc::indoc! {r#"
+        {
+          "name": "node-env-tool",
+          "version": "1.0.0",
+          "bin": {
+            "node-env-tool": "cli.js"
+          }
+        }
+    "#},
+        )
+        .with_file(
+            "node-env-tool/cli.js",
+            indoc::indoc! {r#"
+        #!/usr/bin/env node
+        console.log("exec node env ok");
+    "#},
+        );
+    let package = context.work_dir().child("node-env-tool");
+    let cli = package.child("cli.js");
+    make_executable(cli.path())?;
+
+    let dependency = serde_json::to_string(package.path())?;
+    let context = context.with_config(indoc::formatdoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: node
+                name: node
+                language: node
+                entry: command-that-must-not-run
+                additional_dependencies: [{dependency}]
+    "});
+
+    cmd_snapshot!(context, context.exec().args([
+        "node",
+        "--",
+        "node-env-tool",
+    ]), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    exec node env ok
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
 
 /// Test `language_version` parsing and auto downloading works correctly.
 /// We use `setup-node` action to install node 20 in CI, so node 19 should be downloaded by prek.
@@ -13,9 +70,7 @@ fn language_version() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let context = TestContext::new();
-    context.init_project();
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -56,18 +111,14 @@ fn language_version() -> anyhow::Result<()> {
                 language_version: 'lts/iron' # node 20
                 always_run: true
     "});
-    context.git_add(".");
+    context.git().add_all();
 
     let node_dir = context.home_dir().child("tools").child("node");
     node_dir.assert(predicates::path::missing());
 
-    let filters = context
-        .filters()
-        .into_iter()
-        .chain([(r"v(\d+)\.\d+.\d+", "v$1.X.X")])
-        .collect::<Vec<_>>();
+    let context = context.with_filter(r"v(\d+)\.\d+.\d+", "v$1.X.X");
 
-    cmd_snapshot!(filters, context.run().arg("-v"), @r#"
+    cmd_snapshot!(context, context.run().arg("-v"), @r#"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -135,10 +186,7 @@ fn language_version() -> anyhow::Result<()> {
 /// Test that `additional_dependencies` are installed correctly.
 #[test]
 fn additional_dependencies() {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -152,9 +200,9 @@ fn additional_dependencies() {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -175,7 +223,7 @@ fn additional_dependencies() {
     ");
 
     // Run again to check `health_check` works correctly.
-    cmd_snapshot!(context.filters(), context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -196,17 +244,195 @@ fn additional_dependencies() {
     ");
 }
 
+/// Test that remote Node packages with runtime dependencies are prepared through npm's Git
+/// package path before installation.
+///
+/// This runs on every supported npm version. In particular, npm 11.9 through
+/// 11.12 must not receive `--allow-git=root` because npm's missing `_isRoot`
+/// propagation bug rejects root-level Git dependencies with EALLOWGIT:
+/// <https://github.com/npm/cli/issues/9189>
+#[test]
+fn remote_package_is_installed_from_git() -> anyhow::Result<()> {
+    let context = TestEnv::new_git();
+    let hook_repo = context.create_repo("remote-node-hook");
+
+    hook_repo
+        .path()
+        .child(PRE_COMMIT_HOOKS_YAML)
+        .write_str(indoc::indoc! {r"
+        - id: remote-node-hook
+          name: remote-node-hook
+          language: node
+          entry: remote-node-hook
+          always_run: true
+          pass_filenames: false
+    "})?;
+    hook_repo
+        .path()
+        .child("package.json")
+        .write_str(indoc::indoc! {r#"
+        {
+          "name": "remote-node-hook",
+          "version": "1.0.0",
+          "bin": {
+            "remote-node-hook": "cli.js"
+          },
+          "dependencies": {
+            "is-number": "7.0.0"
+          }
+        }
+    "#})?;
+    let cli = hook_repo.path().child("cli.js");
+    cli.write_str(indoc::indoc! {r#"
+        #!/usr/bin/env node
+        const isNumber = require("is-number");
+        if (!isNumber(42)) process.exit(1);
+        console.log("remote hook ok");
+    "#})?;
+    make_executable(cli.path())?;
+
+    hook_repo
+        .git()
+        .add_all()
+        .commit("Add remote Node hook")
+        .tag("v1.0.0");
+
+    let context = context.with_config(indoc::formatdoc! {r"
+        repos:
+          - repo: {}
+            rev: v1.0.0
+            hooks:
+              - id: remote-node-hook
+                verbose: true
+    ", hook_repo.path().display()});
+    context.git().add_all();
+
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_HOME, ".prek-cache"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    remote-node-hook.........................................................Passed
+    - hook id: remote-node-hook
+    - duration: [TIME]
+
+      remote hook ok
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+/// A remote Node package's `prepare` script must be able to use its dev dependencies.
+///
+/// This models packages such as google/gts: the executable is generated by `prepare`,
+/// the build tool is a dev dependency, and generated output is not committed. Installing
+/// the checkout as a folder runs `prepare` before that dev dependency exists and fails.
+/// Installing it as a Git package makes npm prepare a temporary clone after installing
+/// its development dependencies.
+#[test]
+fn remote_prepare_uses_dev_dependencies() -> anyhow::Result<()> {
+    let context = TestEnv::new_git();
+    let hook_repo = context.create_repo("prepared-node-hook");
+
+    hook_repo
+        .path()
+        .child(PRE_COMMIT_HOOKS_YAML)
+        .write_str(indoc::indoc! {r"
+        - id: prepared-node-hook
+          name: prepared-node-hook
+          language: node
+          entry: prepared-node-hook
+          always_run: true
+          pass_filenames: false
+    "})?;
+    hook_repo
+        .path()
+        .child("package.json")
+        .write_str(indoc::indoc! {r#"
+        {
+          "name": "prepared-node-hook",
+          "version": "1.0.0",
+          "bin": {
+            "prepared-node-hook": "dist/cli.js"
+          },
+          "files": [
+            "dist"
+          ],
+          "scripts": {
+            "prepare": "tsc"
+          },
+          "devDependencies": {
+            "typescript": "5.6.3"
+          }
+        }
+    "#})?;
+    hook_repo
+        .path()
+        .child("tsconfig.json")
+        .write_str(indoc::indoc! {r#"
+        {
+          "compilerOptions": {
+            "module": "CommonJS",
+            "outDir": "dist",
+            "target": "ES2020"
+          },
+          "include": [
+            "src"
+          ]
+        }
+    "#})?;
+    hook_repo
+        .path()
+        .child(".gitignore")
+        .write_str("dist/\nnode_modules/\n")?;
+
+    let source = hook_repo.path().child("src");
+    source.create_dir_all()?;
+    source.child("cli.ts").write_str(indoc::indoc! {r#"
+        #!/usr/bin/env node
+        console.log("prepared hook ok");
+    "#})?;
+
+    hook_repo
+        .git()
+        .add_all()
+        .commit("Add source-built Node hook")
+        .tag("v1.0.0");
+
+    let context = context.with_config(indoc::formatdoc! {r"
+        repos:
+          - repo: {}
+            rev: v1.0.0
+            hooks:
+              - id: prepared-node-hook
+                verbose: true
+    ", hook_repo.path().display()});
+    context.git().add_all();
+
+    cmd_snapshot!(context, context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    prepared-node-hook.......................................................Passed
+    - hook id: prepared-node-hook
+    - duration: [TIME]
+
+      prepared hook ok
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
 /// Test that lowercase npm config inherited from `npm exec` cannot redirect installs.
 #[test]
 fn additional_dependencies_ignore_inherited_npm_config_prefix() -> anyhow::Result<()> {
-    let context = TestContext::new();
-    context.init_project();
-
-    let package_dir = context.work_dir().child("prefix-fixture");
-    package_dir.create_dir_all()?;
-    package_dir
-        .child("package.json")
-        .write_str(indoc::indoc! {r#"
+    let context = TestEnv::new_git()
+        .with_file(
+            "prefix-fixture/package.json",
+            indoc::indoc! {r#"
         {
           "name": "prek-prefix-fixture",
           "version": "1.0.0",
@@ -214,15 +440,21 @@ fn additional_dependencies_ignore_inherited_npm_config_prefix() -> anyhow::Resul
             "prek-prefix-fixture": "cli.js"
           }
         }
-    "#})?;
-    let cli = package_dir.child("cli.js");
-    cli.write_str(indoc::indoc! {r#"
+    "#},
+        )
+        .with_file(
+            "prefix-fixture/cli.js",
+            indoc::indoc! {r#"
         #!/usr/bin/env node
         console.log("prefix fixture ok")
-    "#})?;
+    "#},
+        );
+    let package_dir = context.work_dir().child("prefix-fixture");
+    let cli = package_dir.child("cli.js");
     make_executable(cli.path())?;
 
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let dependency = serde_json::to_string(package_dir.path())?;
+    let context = context.with_config(indoc::formatdoc! {r"
         repos:
           - repo: local
             hooks:
@@ -230,13 +462,13 @@ fn additional_dependencies_ignore_inherited_npm_config_prefix() -> anyhow::Resul
                 name: node
                 language: node
                 entry: prek-prefix-fixture
-                additional_dependencies: ["./prefix-fixture"]
+                additional_dependencies: [{dependency}]
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "#});
+    "});
 
-    context.git_add(".");
+    context.git().add_all();
 
     let fake_prefix = context.home_dir().child("fake-prefix");
     fake_prefix.create_dir_all()?;
@@ -245,8 +477,7 @@ fn additional_dependencies_ignore_inherited_npm_config_prefix() -> anyhow::Resul
     global_npmrc.write_str("prefix=${HOME}/global-npmrc-prefix\n")?;
     user_npmrc.write_str("//registry.example.test/:_authToken=fake-token\n")?;
 
-    cmd_snapshot!(
-        context.filters(),
+    cmd_snapshot!(context,
         context
             .run()
             .env("npm_config_prefix", fake_prefix.path())
@@ -281,10 +512,7 @@ fn additional_dependencies_ignore_inherited_npm_config_prefix() -> anyhow::Resul
 /// Regression test for #1492: `install()` must use the provisioned toolchain.
 #[test]
 fn additional_dependencies_without_system_node() -> anyhow::Result<()> {
-    let context = TestContext::new();
-    context.init_project();
-
-    context.write_pre_commit_config(indoc::indoc! {r#"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -297,11 +525,11 @@ fn additional_dependencies_without_system_node() -> anyhow::Result<()> {
                 pass_filenames: false
     "#});
 
-    context.git_add(".");
+    context.git().add_all();
 
     let new_path = remove_bin_from_path("node", None)?;
 
-    cmd_snapshot!(context.filters(), context.run().env("PATH", new_path), @r"
+    cmd_snapshot!(context, context.run().env("PATH", new_path), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -316,9 +544,7 @@ fn additional_dependencies_without_system_node() -> anyhow::Result<()> {
 /// Test that `npm.cmd` can be found on Windows.
 #[test]
 fn npm_version() {
-    let context = TestContext::new();
-    context.init_project();
-    context.write_pre_commit_config(indoc::indoc! {r"
+    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -330,15 +556,11 @@ fn npm_version() {
                 pass_filenames: false
                 verbose: true
     "});
-    context.git_add(".");
+    context.git().add_all();
 
-    let filters = context
-        .filters()
-        .into_iter()
-        .chain([(r"\d+\.\d+\.\d+", "[NPM_VERSION]")])
-        .collect::<Vec<_>>();
+    let context = context.with_filter(r"\d+\.\d+\.\d+", "[NPM_VERSION]");
 
-    cmd_snapshot!(filters, context.run(), @r"
+    cmd_snapshot!(context, context.run(), @r"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -350,4 +572,125 @@ fn npm_version() {
 
     ----- stderr -----
     ");
+}
+
+#[test]
+fn node_install_preserves_global_git_config_and_isolates_repository() -> anyhow::Result<()> {
+    let context = TestEnv::new_git();
+
+    // Installing this additional dependency forces npm to invoke Git during environment setup.
+    let dependency_repo = context.create_repo("sentinel-node-dependency");
+    dependency_repo
+        .path()
+        .child("package.json")
+        .write_str(indoc::indoc! {r#"
+        {
+          "name": "sentinel-node-dependency",
+          "version": "1.0.0"
+        }
+    "#})?;
+    dependency_repo
+        .git()
+        .add_all()
+        .commit("Add sentinel Node dependency");
+
+    let hook_repo = context.create_repo("sentinel-node-hook");
+
+    hook_repo
+        .path()
+        .child("package.json")
+        .write_str(indoc::indoc! {r#"
+        {
+          "name": "sentinel-node-tool",
+          "version": "1.0.0",
+          "bin": {
+            "sentinel-node-tool": "cli.js"
+          }
+        }
+    "#})?;
+    let cli = hook_repo.path().child("cli.js");
+    cli.write_str(indoc::indoc! {r#"
+        #!/usr/bin/env node
+        console.log("sentinel node ok");
+    "#})?;
+    make_executable(cli.path())?;
+    hook_repo
+        .path()
+        .child(PRE_COMMIT_HOOKS_YAML)
+        .write_str(indoc::indoc! {r"
+        - id: sentinel-node
+          name: sentinel-node
+          entry: sentinel-node-tool
+          language: node
+          always_run: true
+          pass_filenames: false
+    "})?;
+
+    hook_repo
+        .git()
+        .add_all()
+        .commit("Add sentinel Node hook")
+        .tag("v1.0.0");
+
+    let context = context.with_config(indoc::formatdoc! {r"
+        repos:
+          - repo: {repo}
+            rev: v1.0.0
+            hooks:
+              - id: sentinel-node
+                additional_dependencies:
+                  - git+file:///prek-node-git-dependency
+    ", repo = hook_repo.path().display()});
+    context.git().add_all();
+
+    // The regression corrupts the calling repository's index, so capture it before npm runs.
+    let staged_before = context
+        .git()
+        .command()
+        .args(["ls-files", "--stage"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let dependency_url = Url::from_file_path(dependency_repo.path().path())
+        .map_err(|()| anyhow::anyhow!("Failed to create dependency repository URL"))?;
+    let global_gitconfig = context.work_dir().child("global.gitconfig");
+    // Keep the dependency local while requiring npm's Git subprocess to inherit global config.
+    context
+        .git()
+        .command()
+        .args(["config", "--file"])
+        .arg(global_gitconfig.path())
+        .arg(format!("url.{dependency_url}.insteadOf"))
+        .arg("file:///prek-node-git-dependency")
+        .assert()
+        .success();
+
+    let git_dir = context.work_dir().child(".git");
+    // Simulate the repository-local variables Git exports to hooks from a linked worktree.
+    context
+        .run()
+        .arg("--all-files")
+        .env(EnvVars::GIT_DIR, git_dir.path())
+        .env("GIT_INDEX_FILE", git_dir.child("index").path())
+        .env("GIT_CONFIG_GLOBAL", global_gitconfig.path())
+        .env(EnvVars::GIT_TERMINAL_PROMPT, "0")
+        .assert()
+        .success();
+
+    // Success proves the URL rewrite survived; an unchanged index proves repository isolation.
+    let staged_after = context
+        .git()
+        .command()
+        .args(["ls-files", "--stage"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(staged_after, staged_before);
+
+    Ok(())
 }
