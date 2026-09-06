@@ -142,12 +142,23 @@ For remote hooks, prek creates a Conda environment from the hook repository's
 `repo: local` hooks, prek creates a minimal Conda environment and installs only
 the hook's `additional_dependencies`.
 
-By default, prek uses a system-installed `conda` executable. For compatibility
-with pre-commit, setting `PRE_COMMIT_USE_MAMBA` uses `mamba`, and setting
-`PRE_COMMIT_USE_MICROMAMBA` uses `micromamba`.
+By default, prek automatically selects the first available system installer in
+this order: [Pixi](https://pixi.prefix.dev/), Micromamba, Mamba, then Conda. Set
+`PREK_CONDA_INSTALLER` to `pixi`, `micromamba`, `mamba`, or `conda` to select one
+explicitly, or to `auto` to request automatic selection. prek does not install
+these tools.
+
+When Pixi is selected, prek imports a remote hook's `environment.yml` into an
+isolated Pixi workspace. For `repo: local` hooks, it initializes an empty
+workspace using Pixi's configured default channels. Pixi's user and system
+configuration is honored, except that environments are always kept inside
+prek's hook store. The selected installer only affects newly created
+environments. An existing matching environment remains reusable regardless of
+the current setting or which installers are available on `PATH`.
 
 `additional_dependencies` are installed into the created environment with
-`conda install -p <env> ...` using the selected Conda-compatible executable.
+`conda install -p <env> ...` using the selected Conda-compatible executable, or
+with `pixi add ...` when Pixi is selected.
 
 Example:
 
@@ -616,6 +627,8 @@ Gems specified in hook gemspec files and `additional_dependencies` are installed
 ### rust
 
 prek installs binaries via `cargo install --bins --locked` and runs the specified executable. The repository should contain a `Cargo.toml` that produces the binary referenced by `entry`. `additional_dependencies` and `language_version` are supported.
+
+Only crates.io `cli:` dependencies use a preinstalled [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) when [`PREK_USE_CARGO_BINSTALL=1`](reference/environment-variables.md#prek_use_cargo_binstall) is set. prek does not install cargo-binstall or change its telemetry settings. cargo-binstall falls back to compiling from source when it cannot find a suitable binary, unless the user disables its `compile` strategy.
 
 !!! note "Using `--locked` flag"
 

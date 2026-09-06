@@ -1,21 +1,24 @@
 use std::env::consts::EXE_EXTENSION;
 
-use assert_fs::fixture::{FileWriteStr, PathChild, PathCreateDir};
+#[cfg(all(feature = "ci", not(target_os = "windows")))]
+use assert_fs::fixture::PathChild;
 
 use crate::common::{TestEnv, cmd_snapshot};
 
 fn ruby_context() -> TestEnv {
-    TestEnv::new_git().with_filter(
-        r"ruby (\d+\.\d+)\.\d+(?:p\d+)? \(\d{4}-\d{2}-\d{2} revision [0-9a-f]{0,10}\).*?\[.+\]",
-        "ruby $1.X ([DATE] revision [HASH]) [FLAGS] [PLATFORM]",
-    )
+    TestEnv::new()
+        .with_filter(
+            r"ruby (\d+\.\d+)\.\d+(?:p\d+)? \(\d{4}-\d{2}-\d{2} revision [0-9a-f]{0,10}\).*?\[.+\]",
+            "ruby $1.X ([DATE] revision [HASH]) [FLAGS] [PLATFORM]",
+        )
+        .init_git()
 }
 
 /// Test basic Ruby hook with system Ruby
 #[test]
 fn system_ruby() {
     let context = ruby_context();
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -33,7 +36,7 @@ fn system_ruby() {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true
@@ -59,7 +62,7 @@ fn system_ruby() {
 fn language_version_default() {
     let context = ruby_context();
 
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -71,7 +74,7 @@ fn language_version_default() {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true
@@ -91,7 +94,7 @@ fn language_version_default() {
 #[test]
 fn specific_ruby_available() {
     let context = ruby_context();
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -131,7 +134,7 @@ fn specific_ruby_available() {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true
@@ -171,7 +174,7 @@ fn specific_ruby_available() {
 #[test]
 fn specific_ruby_unavailable() {
     let context = ruby_context();
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -183,7 +186,7 @@ fn specific_ruby_unavailable() {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     #[cfg(target_os = "windows")]
     cmd_snapshot!(context, context.run().arg("-v"), @r"
@@ -218,15 +221,17 @@ fn specific_ruby_unavailable() {
 #[test]
 fn additional_gem_dependencies() {
     // Use a gem that is not bundled with Ruby.
-    let context = TestEnv::new_git().with_file(
-        "test_script.rb",
-        indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_file(
+            "test_script.rb",
+            indoc::indoc! {r"
             require 'rspec'
             puts RSpec::Version::STRING
         "},
-    );
+        )
+        .init_git();
 
-    let context = context.with_config(indoc::indoc! {r#"
+    context.write_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -254,7 +259,7 @@ fn additional_gem_dependencies() {
                 pass_filenames: false
                 always_run: true
     "#});
-    context.git().add_all();
+    context.git().add(".");
 
     let context = context.with_filters([
         // Normalize unpinned rspec version (only for test-gem-require, not test-gem-require-versioned)
@@ -301,7 +306,7 @@ fn additional_gem_dependencies() {
 /// Test Ruby hook with gemspec
 #[test]
 fn gemspec_workflow() -> anyhow::Result<()> {
-    let context = TestEnv::new_git()
+    let context = TestEnv::new()
         .with_file(
             "test_gem.gemspec",
             indoc::indoc! {r#"
@@ -332,9 +337,10 @@ fn gemspec_workflow() -> anyhow::Result<()> {
             require 'test_gem'
             puts TestGem.hello
         "},
-        );
+        )
+        .init_git();
 
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -346,7 +352,7 @@ fn gemspec_workflow() -> anyhow::Result<()> {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true
@@ -380,7 +386,8 @@ fn gemspec_workflow() -> anyhow::Result<()> {
 /// Test environment isolation between Ruby hooks
 #[test]
 fn environment_isolation() -> anyhow::Result<()> {
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -427,8 +434,8 @@ fn environment_isolation() -> anyhow::Result<()> {
                 pass_filenames: false
                 always_run: true
                 verbose: true
-    "#});
-    context.git().add_all();
+    "#})
+        .init_git();
 
     let output = context.run().output()?;
 
@@ -539,15 +546,22 @@ fn environment_isolation() -> anyhow::Result<()> {
 
 /// Test local Ruby hook repository with gemspec build and install
 #[test]
-fn local_hook_with_gemspec() -> anyhow::Result<()> {
-    let context = TestEnv::new_git();
-    let hook_repo = context.create_repo("ruby-hook");
-
-    // Create the gemspec
-    hook_repo
-        .path()
-        .child("my_hook.gemspec")
-        .write_str(indoc::indoc! {r#"
+fn local_hook_with_gemspec() {
+    let context = TestEnv::new().init_git();
+    let hook_repo = context
+        .create_hook_repo(
+            "ruby-hook",
+            indoc::indoc! {r"
+            - id: my-hook
+              name: My Hook
+              entry: my-hook
+              language: ruby
+              pass_filenames: false
+        "},
+        )
+        .with_file(
+            "my_hook.gemspec",
+            indoc::indoc! {r#"
             Gem::Specification.new do |spec|
               spec.name          = "my_hook"
               spec.version       = "0.1.0"
@@ -558,38 +572,22 @@ fn local_hook_with_gemspec() -> anyhow::Result<()> {
               spec.executables   = ["my-hook"]
               spec.bindir        = "bin"
             end
-        "#})?;
-
-    // Create executable
-    hook_repo.path().child("bin").create_dir_all()?;
-    hook_repo
-        .path()
-        .child("bin/my-hook")
-        .write_str(indoc::indoc! {r#"
+        "#},
+        )
+        .with_file(
+            "bin/my-hook",
+            indoc::indoc! {r#"
         #!/usr/bin/env ruby
         puts "Hook executed from gem!"
-    "#})?;
-
-    // Create .pre-commit-hooks.yaml manifest
-    hook_repo
-        .path()
-        .child(".pre-commit-hooks.yaml")
-        .write_str(indoc::indoc! {r"
-            - id: my-hook
-              name: My Hook
-              entry: my-hook
-              language: ruby
-              pass_filenames: false
-        "})?;
-
-    hook_repo.git().add_all().commit("Initial commit");
-    let rev = hook_repo.git().rev_parse("HEAD")?;
+    "#},
+        )
+        .build();
 
     // Configure prek to use this local repo
-    let context = context.with_config(indoc::formatdoc! {r"
+    context.write_config(indoc::formatdoc! {r"
             repos:
               - repo: {}
-                rev: {}
+                rev: v1.0.0
                 hooks:
                   - id: my-hook
                     name: my-hook
@@ -598,8 +596,7 @@ fn local_hook_with_gemspec() -> anyhow::Result<()> {
                     pass_filenames: false
                     always_run: true
         ",
-        hook_repo.path().display(),
-        rev
+        hook_repo
     });
     context.git().add(".pre-commit-config.yaml");
 
@@ -615,17 +612,16 @@ fn local_hook_with_gemspec() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }
 
 /// Test Ruby hook with native gem (C extension)
 #[test]
 fn native_gem_dependency() {
     // msgpack is a small native gem that compiles quickly.
-    let context = TestEnv::new_git().with_file(
-        "check_msgpack.rb",
-        indoc::indoc! {r#"
+    let context = TestEnv::new()
+        .with_file(
+            "check_msgpack.rb",
+            indoc::indoc! {r#"
             #!/usr/bin/env ruby
             require 'msgpack'
 
@@ -637,9 +633,10 @@ fn native_gem_dependency() {
             puts "MessagePack native extension working!"
             puts "Packed size: #{packed.bytesize} bytes"
         "#},
-    );
+        )
+        .init_git();
 
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -651,7 +648,7 @@ fn native_gem_dependency() {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true
@@ -671,9 +668,10 @@ fn native_gem_dependency() {
 /// Test Ruby hook that processes files
 #[test]
 fn process_files() {
-    let context = TestEnv::new_git().with_file(
-        "check_ruby.rb",
-        indoc::indoc! {r#"
+    let context = TestEnv::new()
+        .with_file(
+            "check_ruby.rb",
+            indoc::indoc! {r#"
             ARGV.sort.each do |file|
               unless file.end_with?('.rb')
                 puts "Error: #{file} is not a Ruby file"
@@ -682,7 +680,8 @@ fn process_files() {
               puts "OK: #{file}"
             end
         "#},
-    );
+        )
+        .init_git();
 
     let context = context
         .with_config(indoc::indoc! {r"
@@ -700,7 +699,7 @@ fn process_files() {
         .with_file("test.rb", "puts 'hello'")
         .with_file("test.txt", "hello");
 
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run(), @r"
     success: true
@@ -721,20 +720,14 @@ fn process_files() {
 /// is requested that isn't available on the system.
 /// Windows doesn't support auto-download, so this test is only for non-Windows platforms.
 /// The Windows-specific message is tested in `specific_ruby_unavailable`.
+#[cfg(feature = "ci")]
 #[test]
 #[cfg(not(target_os = "windows"))]
 fn auto_download() -> anyhow::Result<()> {
     use assert_fs::assert::PathAssert;
-    use prek_consts::env_vars::{EnvVars, EnvVarsRead};
-
-    if !EnvVars.is_set(EnvVars::CI) {
-        // Skip when not running in CI: local environments may have
-        // unexpected Ruby versions installed.
-        return Ok(());
-    }
 
     let context = ruby_context();
-    let context = context.with_config(indoc::indoc! {r"
+    context.write_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -753,7 +746,7 @@ fn auto_download() -> anyhow::Result<()> {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     let ruby_dir = context.home_dir().child("tools").child("ruby");
     ruby_dir.assert(predicates::path::missing());
@@ -823,7 +816,7 @@ fn auto_download() -> anyhow::Result<()> {
                 pass_filenames: false
                 always_run: true
     "});
-    context.git().add_all();
+    context.git().add(".");
 
     cmd_snapshot!(context, context.run().arg("-v"), @r"
     success: true

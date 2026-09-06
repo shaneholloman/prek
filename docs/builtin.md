@@ -136,7 +136,7 @@ This mode has significant benefits:
 List the builtins bundled with your installed prek version using:
 
 ```bash
-prek util list-builtins -v
+prek util list-builtins
 ```
 
 ### Supported Hooks
@@ -452,8 +452,14 @@ Attempts to load all YAML files to verify syntax.
 
 - `-m`, `--allow-multiple-documents` (alias: `--multi`)
     - Allow YAML multi-document syntax (`---`).
+- `--disallow-unknown-tags`
+    - Reject unrecognized YAML tags.
 - `--unsafe`
     - Parse YAML syntax without loading it. Implies `--allow-multiple-documents`.
+
+**Behavior / caveats**
+
+- Unrecognized YAML tags are allowed by default. This differs from the pinned `pre-commit-hooks` implementation, which rejects them while loading. Use `--disallow-unknown-tags` to match that behavior.
 
 ---
 

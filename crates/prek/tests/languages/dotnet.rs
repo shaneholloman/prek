@@ -1,16 +1,13 @@
-use assert_fs::fixture::{FileWriteStr, PathChild};
-use prek_consts::PRE_COMMIT_HOOKS_YAML;
-use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+#[cfg(feature = "ci")]
+use assert_fs::fixture::PathChild;
 
 use crate::common::{TestEnv, cmd_snapshot};
 
+#[cfg(feature = "ci")]
 #[test]
 fn language_version() {
-    if !EnvVars.is_set(EnvVars::CI) {
-        return;
-    }
-
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -52,9 +49,8 @@ fn language_version() {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "});
-
-    context.git().add_all();
+    "})
+        .init_git();
 
     let context = context.with_filter(r"\b(\d+\.\d+)\.\d+\b", "$1.X");
 
@@ -90,7 +86,8 @@ fn language_version() {
 /// Test invalid `language_version` format is rejected.
 #[test]
 fn invalid_language_version() {
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -102,9 +99,8 @@ fn invalid_language_version() {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "});
-
-    context.git().add_all();
+    "})
+        .init_git();
 
     cmd_snapshot!(context, context.run(), @r"
     success: false
@@ -120,13 +116,11 @@ fn invalid_language_version() {
 
 /// Test that multiple different SDK versions can coexist in the tool store.
 /// `net10.0` is preinstalled in the CI, `net8.0` will be installed by the test.
+#[cfg(feature = "ci")]
 #[test]
 fn multiple_sdk_versions() -> anyhow::Result<()> {
-    if !EnvVars.is_set(EnvVars::CI) {
-        return Ok(());
-    }
-
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -146,8 +140,8 @@ fn multiple_sdk_versions() -> anyhow::Result<()> {
                 always_run: true
                 pass_filenames: false
                 verbose: true
-    "});
-    context.git().add_all();
+    "})
+        .init_git();
 
     let context = context.with_filter(r"\b(\d+\.\d+)\.\d+\b", "$1.X");
 
@@ -196,13 +190,11 @@ fn multiple_sdk_versions() -> anyhow::Result<()> {
 }
 
 /// Test installing a specific version of a dotnet tool.
+#[cfg(feature = "ci")]
 #[test]
 fn additional_dependencies_with_version() {
-    if !EnvVars.is_set(EnvVars::CI) {
-        return;
-    }
-
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r#"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r#"
         repos:
           - repo: local
             hooks:
@@ -214,8 +206,8 @@ fn additional_dependencies_with_version() {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "#});
-    context.git().add_all();
+    "#})
+        .init_git();
 
     let context = context.with_filter(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]");
 
@@ -250,37 +242,34 @@ fn additional_dependencies_with_version() {
 }
 
 /// Test that additional dependencies in a remote repo are installed correctly.
+#[cfg(feature = "ci")]
 #[test]
-fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
-    if !EnvVars.is_set(EnvVars::CI) {
-        return Ok(());
-    }
+fn additional_dependencies_in_remote_repo() {
+    let context = TestEnv::new().init_git();
+    let hook_repo = context
+        .create_hook_repo(
+            "dotnet-hook",
+            indoc::indoc! {r#"
+            - id: dotnet-outdated
+              name: dotnet-outdated
+              language: dotnet
+              entry: dotnet-outdated --version
+              additional_dependencies: ["dotnet-outdated-tool:4.7.1"]
+        "#},
+        )
+        .build();
 
-    let context = TestEnv::new_git();
-    let repo = context.create_repo("dotnet-hook");
-    let repo_path = repo.path();
-    repo_path
-        .child(PRE_COMMIT_HOOKS_YAML)
-        .write_str(indoc::indoc! {r#"
-        - id: dotnet-outdated
-          name: dotnet-outdated
-          language: dotnet
-          entry: dotnet-outdated --version
-          additional_dependencies: ["dotnet-outdated-tool:4.7.1"]
-    "#})?;
-    repo.git().add_all().commit("Add manifest").tag("v0.1.0");
-
-    let context = context.with_config(indoc::formatdoc! {r"
+    context.write_config(indoc::formatdoc! {r"
         repos:
           - repo: {}
-            rev: v0.1.0
+            rev: v1.0.0
             hooks:
               - id: dotnet-outdated
                 verbose: true
                 pass_filenames: false
-    ", repo_path.display()});
+    ", hook_repo});
 
-    context.git().add_all();
+    context.git().add(".");
 
     let context = context.with_filter(r"\b(4\.7\.1\+)[0-9a-f]+\b", "${1}[SHA]");
 
@@ -297,18 +286,13 @@ fn additional_dependencies_in_remote_repo() -> anyhow::Result<()> {
 
     ----- stderr -----
     ");
-
-    Ok(())
 }
 
 /// Ensure that stderr from hooks is captured and shown to the user.
+#[cfg(feature = "ci")]
 #[test]
 fn hook_stderr() {
-    if !EnvVars.is_set(EnvVars::CI) {
-        return;
-    }
-
-    let context = TestEnv::new_git()
+    let context = TestEnv::new()
         .with_config(indoc::indoc! {r"
         repos:
           - repo: local
@@ -338,9 +322,8 @@ fn hook_stderr() {
         Console.Error.Flush();
         Environment.Exit(1);
     "#},
-        );
-
-    context.git().add_all();
+        )
+        .init_git();
 
     cmd_snapshot!(context, context.run(), @"
     success: false

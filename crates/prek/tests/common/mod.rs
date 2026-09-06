@@ -1,4 +1,4 @@
-#![allow(dead_code, unreachable_pub)]
+#![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -6,12 +6,12 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use assert_cmd::assert::OutputAssertExt;
-use assert_fs::fixture::{ChildPath, FileWriteBin, FileWriteStr, PathChild, PathCreateDir};
+use assert_fs::fixture::{ChildPath, FileWriteBin, PathChild, PathCreateDir};
 use etcetera::BaseStrategy;
 use rustc_hash::FxHashSet;
 
-use prek_consts::PRE_COMMIT_CONFIG_YAML;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+use prek_consts::{PRE_COMMIT_CONFIG_YAML, PRE_COMMIT_HOOKS_YAML};
 
 #[cfg(unix)]
 pub fn make_executable(path: impl AsRef<Path>) -> std::io::Result<()> {
@@ -32,25 +32,20 @@ pub fn make_executable(_path: impl AsRef<Path>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn git_cmd(dir: impl AsRef<Path>, home_dir: impl AsRef<Path>) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(dir)
-        .env(EnvVars::PREK_HOME, home_dir.as_ref())
-        .args(["-c", "commit.gpgsign=false"])
-        .args(["-c", "tag.gpgsign=false"])
-        .args(["-c", "core.autocrlf=false"])
-        .args(["-c", "user.name=Prek Test"])
-        .args(["-c", "user.email=test@prek.dev"]);
-    cmd
+fn write_test_file(root: &ChildPath, file: &Path, content: &[u8]) {
+    root.child(file)
+        .write_binary(content)
+        .unwrap_or_else(|err| panic!("Failed to write test file `{}`: {err}", file.display()));
 }
 
-fn init_repo(path: impl AsRef<Path>, home_dir: impl AsRef<Path>) {
-    git_cmd(path, home_dir)
-        .arg("-c")
-        .arg("init.defaultBranch=master")
-        .arg("init")
-        .assert()
-        .success();
+fn write_executable_test_file(root: &ChildPath, file: &Path, content: &[u8]) {
+    write_test_file(root, file, content);
+    make_executable(root.child(file)).unwrap_or_else(|err| {
+        panic!(
+            "Failed to make test file `{}` executable: {err}",
+            file.display()
+        )
+    });
 }
 
 /// Git operations for an integration-test repository.
@@ -69,12 +64,29 @@ impl<'a> TestGit<'a> {
 
     /// Create a raw Git command for operations not covered by this wrapper.
     pub fn command(&self) -> Command {
-        git_cmd(&self.path, self.home_dir)
+        let mut command = Command::new("git");
+        command
+            .current_dir(&self.path)
+            .env(EnvVars::PREK_HOME, self.home_dir)
+            .args(["-c", "commit.gpgsign=false"])
+            .args(["-c", "tag.gpgsign=false"])
+            .args(["-c", "core.autocrlf=false"])
+            .args(["-c", "user.name=Prek Test"])
+            .args(["-c", "user.email=test@prek.dev"]);
+        command
+    }
+
+    /// Run a Git command that is expected to succeed.
+    pub fn run<S>(&self, args: impl IntoIterator<Item = S>) -> &Self
+    where
+        S: AsRef<OsStr>,
+    {
+        self.command().args(args).assert().success();
+        self
     }
 
     pub fn init(&self) -> &Self {
-        init_repo(&self.path, self.home_dir);
-        self
+        self.run(["-c", "init.defaultBranch=master", "init"])
     }
 
     pub fn add(&self, path: impl AsRef<OsStr>) -> &Self {
@@ -82,16 +94,8 @@ impl<'a> TestGit<'a> {
         self
     }
 
-    pub fn add_all(&self) -> &Self {
-        self.add(".")
-    }
-
     pub fn commit(&self, message: &str) -> &Self {
-        self.command()
-            .args(["commit", "-m", message])
-            .assert()
-            .success();
-        self
+        self.run(["commit", "-m", message])
     }
 
     pub fn tag(&self, tag: &str) -> &Self {
@@ -112,10 +116,7 @@ impl<'a> TestGit<'a> {
     }
 
     pub fn rm(&self, path: &str) -> &Self {
-        self.command()
-            .args(["rm", "--cached", path])
-            .assert()
-            .success();
+        self.run(["rm", "--cached", path]);
         let file_path = self.path.join(path);
         if file_path.exists() {
             fs_err::remove_file(file_path).unwrap();
@@ -123,25 +124,12 @@ impl<'a> TestGit<'a> {
         self
     }
 
-    pub fn clean(&self) -> &Self {
-        self.command().args(["clean", "-fdx"]).assert().success();
-        self
-    }
-
     pub fn branch(&self, branch_name: &str) -> &Self {
-        self.command()
-            .args(["branch", branch_name])
-            .assert()
-            .success();
-        self
+        self.run(["branch", branch_name])
     }
 
     pub fn checkout(&self, branch_name: &str) -> &Self {
-        self.command()
-            .args(["checkout", branch_name])
-            .assert()
-            .success();
-        self
+        self.run(["checkout", branch_name])
     }
 }
 
@@ -154,16 +142,35 @@ impl TestRepo {
     fn new(path: ChildPath, home_dir: PathBuf) -> Self {
         path.create_dir_all()
             .expect("Failed to create test repository directory");
-        init_repo(&path, &home_dir);
-        Self { path, home_dir }
+        let repo = Self { path, home_dir };
+        repo.git().init();
+        repo
     }
 
     pub fn path(&self) -> &ChildPath {
         &self.path
     }
 
+    #[must_use]
+    pub fn with_file(self, file: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Self {
+        write_test_file(&self.path, file.as_ref(), content.as_ref());
+        self
+    }
+
+    #[must_use]
+    pub fn with_executable_file(self, file: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Self {
+        write_executable_test_file(&self.path, file.as_ref(), content.as_ref());
+        self
+    }
+
     pub fn git(&self) -> TestGit<'_> {
         TestGit::new(&self.path, &self.home_dir)
+    }
+
+    /// Commit the fixture at `v1.0.0` and return its config-ready path.
+    pub fn build(self) -> String {
+        self.git().add(".").commit("Initial commit").tag("v1.0.0");
+        self.path().to_string_lossy().replace('\\', "/")
     }
 }
 
@@ -189,36 +196,6 @@ impl TestEnv {
         let work_dir = ChildPath::new(root.path()).child("temp");
         fs_err::create_dir_all(&work_dir).expect("Failed to create test working directory");
 
-        Self::from_root(root, work_dir)
-    }
-
-    /// Create an isolated test environment with a Git repository.
-    pub fn new_git() -> Self {
-        let env = Self::new();
-        init_repo(&env.work_dir, &env.home_dir);
-        env
-    }
-
-    /// Create a Git test environment at the given working directory.
-    pub fn new_git_at(path: impl AsRef<Path>) -> Self {
-        let env = Self::new_at(path);
-        init_repo(&env.work_dir, &env.home_dir);
-        env
-    }
-
-    fn new_at(path: impl AsRef<Path>) -> Self {
-        let bucket = Self::test_bucket_dir();
-        fs_err::create_dir_all(&bucket).expect("Failed to create test bucket");
-
-        let root = tempfile::TempDir::new_in(bucket).expect("Failed to create test root directory");
-
-        let work_dir = ChildPath::new(path.as_ref().to_path_buf());
-        fs_err::create_dir_all(&work_dir).expect("Failed to create test working directory");
-
-        Self::from_root(root, work_dir)
-    }
-
-    fn from_root(root: tempfile::TempDir, work_dir: ChildPath) -> Self {
         let home_dir = ChildPath::new(root.path()).child("home");
         fs_err::create_dir_all(&home_dir).expect("Failed to create test home directory");
 
@@ -229,6 +206,13 @@ impl TestEnv {
             filters: Vec::new(),
             _root: root,
         }
+    }
+
+    /// Initialize a Git repository, stage all existing files, and return this environment.
+    #[must_use]
+    pub fn init_git(self) -> Self {
+        self.git().init().add(".");
+        self
     }
 
     fn build_default_filters(&self) -> Vec<(String, String)> {
@@ -314,11 +298,7 @@ impl TestEnv {
 
     /// Write or replace a file in the working directory.
     pub fn write_file(&self, file: impl AsRef<Path>, content: impl AsRef<[u8]>) {
-        let file = file.as_ref();
-        self.work_dir
-            .child(file)
-            .write_binary(content.as_ref())
-            .unwrap_or_else(|err| panic!("Failed to write test file `{}`: {err}", file.display()));
+        write_test_file(&self.work_dir, file.as_ref(), content.as_ref());
     }
 
     /// Write a file in the working directory and return this environment.
@@ -328,12 +308,37 @@ impl TestEnv {
         self
     }
 
+    /// Write files in the working directory and return this environment.
+    #[must_use]
+    pub fn with_files<P, C>(self, files: impl IntoIterator<Item = (P, C)>) -> Self
+    where
+        P: AsRef<Path>,
+        C: AsRef<[u8]>,
+    {
+        for (file, content) in files {
+            self.write_file(file, content);
+        }
+        self
+    }
+
+    /// Write or replace an executable file in the working directory.
+    pub fn write_executable_file(&self, file: impl AsRef<Path>, content: impl AsRef<[u8]>) {
+        write_executable_test_file(&self.work_dir, file.as_ref(), content.as_ref());
+    }
+
+    /// Write an executable file in the working directory and return this environment.
+    #[must_use]
+    pub fn with_executable_file(self, file: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Self {
+        self.write_executable_file(file, content);
+        self
+    }
+
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("prek"));
         cmd.current_dir(self.work_dir())
             .env(EnvVars::PREK_HOME, &**self.home_dir())
             .env(EnvVars::PREK_INTERNAL__SORT_FILENAMES, "1")
-            // Git commands spawned by prek do not inherit `git_cmd`'s `-c` arguments.
+            // Git commands spawned by prek do not inherit `TestGit::command`'s `-c` arguments.
             .envs([
                 ("GIT_CONFIG_COUNT", "1"),
                 ("GIT_CONFIG_KEY_0", "core.autocrlf"),
@@ -364,12 +369,8 @@ impl TestEnv {
     }
 
     pub fn write_user_config(&self, content: &str) {
-        let config_dir = self.home_dir.child("config").child("prek");
-        config_dir
-            .create_dir_all()
-            .expect("Failed to create user config directory");
         self.user_config_path()
-            .write_str(content)
+            .write_binary(content.as_bytes())
             .expect("Failed to write user config");
     }
 
@@ -465,12 +466,23 @@ impl TestEnv {
         &self.work_dir
     }
 
+    /// Get a path relative to the working directory.
+    pub fn child(&self, path: impl AsRef<Path>) -> ChildPath {
+        self.work_dir.child(path)
+    }
+
     /// Get the home directory for the test environment.
     pub fn home_dir(&self) -> &ChildPath {
         &self.home_dir
     }
 
-    /// Create a Git repository that can be used as a local remote.
+    /// Create a local hook repository from its manifest definition.
+    pub fn create_hook_repo(&self, name: impl AsRef<Path>, manifest: impl AsRef<str>) -> TestRepo {
+        self.create_repo(name)
+            .with_file(PRE_COMMIT_HOOKS_YAML, manifest.as_ref())
+    }
+
+    /// Create an uncommitted Git repository for non-hook fixtures or custom history.
     pub fn create_repo(&self, name: impl AsRef<Path>) -> TestRepo {
         TestRepo::new(
             self.home_dir.child("test-repos").child(name),
@@ -487,24 +499,55 @@ impl TestEnv {
 
     /// Write or replace the `.pre-commit-config.yaml` file in the working directory.
     pub fn write_config(&self, content: impl AsRef<str>) {
-        self.work_dir
-            .child(PRE_COMMIT_CONFIG_YAML)
-            .write_str(content.as_ref())
-            .expect("Failed to write pre-commit config");
+        self.write_file(PRE_COMMIT_CONFIG_YAML, content.as_ref());
     }
 
-    /// Setup a workspace with multiple projects, each with the same config.
-    /// This creates a tree-like directory structure for testing workspace functionality.
-    pub fn setup_workspace(&self, project_paths: &[&str], config: &str) {
+    /// Write a `.pre-commit-config.yaml` file for a nested project.
+    fn write_project_config(&self, project: impl AsRef<Path>, content: impl AsRef<str>) {
+        self.write_file(
+            project.as_ref().join(PRE_COMMIT_CONFIG_YAML),
+            content.as_ref(),
+        );
+    }
+
+    /// Write a nested project config and return this environment.
+    #[must_use]
+    pub fn with_project_config(self, project: impl AsRef<Path>, content: impl AsRef<str>) -> Self {
+        self.write_project_config(project, content);
+        self
+    }
+
+    /// Write the same config for the workspace root and each nested project.
+    pub fn write_workspace<P>(
+        &self,
+        project_paths: impl IntoIterator<Item = P>,
+        config: impl AsRef<str>,
+    ) where
+        P: AsRef<Path>,
+    {
+        let config = config.as_ref();
         self.write_config(config);
 
         for path in project_paths {
-            self.write_file(Path::new(path).join(PRE_COMMIT_CONFIG_YAML), config);
+            self.write_project_config(path, config);
         }
+    }
+
+    /// Write workspace configs and return this environment.
+    #[must_use]
+    pub fn with_workspace<P>(
+        self,
+        project_paths: impl IntoIterator<Item = P>,
+        config: impl AsRef<str>,
+    ) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        self.write_workspace(project_paths, config);
+        self
     }
 }
 
-#[doc(hidden)]
 pub fn bind_filters<'a, T>(
     filters: impl IntoIterator<Item = (&'a str, &'a str)>,
     f: impl FnOnce() -> T,
@@ -516,7 +559,6 @@ pub fn bind_filters<'a, T>(
     settings.bind(f)
 }
 
-#[doc(hidden)] // Macro and test environment only, don't use directly.
 pub const INSTA_FILTERS: &[(&str, &str)] = &[
     // File sizes
     (r"(\s|\()(\d+\.)?\d+\s?([KMGTPE]i)?B", "$1[SIZE]"),
@@ -569,7 +611,7 @@ macro_rules! snapshot {
 #[allow(unused_imports)]
 pub(crate) use snapshot;
 
-pub(crate) fn remove_bin_from_path(bin: &str, path: Option<OsString>) -> anyhow::Result<OsString> {
+pub fn remove_bin_from_path(bin: &str, path: Option<OsString>) -> anyhow::Result<OsString> {
     let path = path.unwrap_or(EnvVars.var_os(EnvVars::PATH).expect("Path must be set"));
     let Ok(dirs) = which::which_all(bin) else {
         return Ok(path);

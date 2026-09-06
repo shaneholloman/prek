@@ -1,11 +1,10 @@
 use assert_fs::fixture::{FileWriteStr, PathChild, PathCreateDir};
-use prek_consts::PRE_COMMIT_HOOKS_YAML;
 
-use crate::common::{TestEnv, cmd_snapshot, make_executable};
+use crate::common::{TestEnv, cmd_snapshot};
 
 #[test]
 fn local_hook() {
-    let context = TestEnv::new_git()
+    let context = TestEnv::new()
         .with_config(indoc::indoc! {r"
         repos:
           - repo: local
@@ -18,9 +17,8 @@ fn local_hook() {
                 verbose: true
                 pass_filenames: false
     "})
-        .with_file("hello.php", "<?php echo \"Hello from PHP!\\n\";\n");
-
-    context.git().add_all();
+        .with_file("hello.php", "<?php echo \"Hello from PHP!\\n\";\n")
+        .init_git();
 
     cmd_snapshot!(context, context.run(), @r"
     success: true
@@ -52,42 +50,36 @@ fn local_hook() {
 
 #[test]
 fn remote_repo_install() -> anyhow::Result<()> {
-    let context = TestEnv::new_git();
-    let hook_repo = context.create_repo("php-hook");
-
-    hook_repo
-        .path()
-        .child(COMPOSER_JSON)
-        .write_str(indoc::indoc! {r#"
-            {
-              "name": "prek-test/php-hook",
-              "bin": ["bin/php-hook"]
-            }
-        "#})?;
-    hook_repo
-        .path()
-        .child(PRE_COMMIT_HOOKS_YAML)
-        .write_str(indoc::indoc! {r"
-            - id: php-hook
-              name: php-hook
-              language: php
-              entry: php-hook
-        "})?;
-    hook_repo.path().child("bin").create_dir_all()?;
-    let hook_binary = hook_repo.path().child("bin/php-hook");
-    hook_binary.write_str(indoc::indoc! {r#"
+    let context = TestEnv::new().init_git();
+    let hook_repo = context
+        .create_hook_repo(
+            "php-hook",
+            indoc::indoc! {r"
+                - id: php-hook
+                  name: php-hook
+                  language: php
+                  entry: php-hook
+            "},
+        )
+        .with_file(
+            COMPOSER_JSON,
+            indoc::indoc! {r#"
+                {
+                  "name": "prek-test/php-hook",
+                  "bin": ["bin/php-hook"]
+                }
+            "#},
+        )
+        .with_executable_file(
+            "bin/php-hook",
+            indoc::indoc! {r#"
         #!/usr/bin/env php
         <?php echo "Hello from remote PHP!\n";
-    "#})?;
-    make_executable(hook_binary.path())?;
+    "#},
+        )
+        .build();
 
-    hook_repo
-        .git()
-        .add_all()
-        .commit("Add PHP hook")
-        .tag("v1.0.0");
-
-    let context = context.with_config(indoc::formatdoc! {r"
+    context.write_config(indoc::formatdoc! {r"
         repos:
           - repo: {}
             rev: v1.0.0
@@ -96,8 +88,8 @@ fn remote_repo_install() -> anyhow::Result<()> {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    ", hook_repo.path().display()});
-    context.git().add_all();
+    ", hook_repo});
+    context.git().add(".");
 
     let composer_home = context.home_dir().child("composer");
     composer_home.create_dir_all()?;
@@ -122,25 +114,26 @@ fn remote_repo_install() -> anyhow::Result<()> {
 
 #[test]
 fn additional_dependencies() -> anyhow::Result<()> {
-    let dependency = TestEnv::new();
-    dependency
-        .work_dir()
-        .child(COMPOSER_JSON)
-        .write_str(indoc::indoc! {r#"
-            {
-              "name": "prek-test/php-dependency",
-              "bin": ["bin/php-dependency"]
-            }
-        "#})?;
-    dependency.work_dir().child("bin").create_dir_all()?;
-    let dependency_binary = dependency.work_dir().child("bin/php-dependency");
-    dependency_binary.write_str(indoc::indoc! {r#"
-        #!/usr/bin/env php
-        <?php echo "Hello from an additional dependency!\n";
-    "#})?;
-    make_executable(dependency_binary.path())?;
+    let dependency = TestEnv::new()
+        .with_file(
+            COMPOSER_JSON,
+            indoc::indoc! {r#"
+                {
+                  "name": "prek-test/php-dependency",
+                  "bin": ["bin/php-dependency"]
+                }
+            "#},
+        )
+        .with_executable_file(
+            "bin/php-dependency",
+            indoc::indoc! {r#"
+                #!/usr/bin/env php
+                <?php echo "Hello from an additional dependency!\n";
+            "#},
+        );
 
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -152,8 +145,8 @@ fn additional_dependencies() -> anyhow::Result<()> {
                 always_run: true
                 verbose: true
                 pass_filenames: false
-    "});
-    context.git().add_all();
+    "})
+        .init_git();
 
     let composer_home = context.home_dir().child("composer");
     composer_home.create_dir_all()?;
@@ -193,7 +186,8 @@ fn additional_dependencies() -> anyhow::Result<()> {
 
 #[test]
 fn language_version() {
-    let context = TestEnv::new_git().with_config(indoc::indoc! {r"
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
         repos:
           - repo: local
             hooks:
@@ -204,8 +198,8 @@ fn language_version() {
                 language_version: '8.4'
                 always_run: true
                 pass_filenames: false
-    "});
-    context.git().add_all();
+    "})
+        .init_git();
 
     cmd_snapshot!(context, context.run(), @r"
     success: false

@@ -305,7 +305,7 @@ jobs:
         with:
           persist-credentials: false
       - name: "Install cargo shear"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -332,12 +332,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-llvm-cov
 
@@ -401,12 +401,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-llvm-cov
 
@@ -430,7 +430,7 @@ jobs:
             --workspace \
             --cargo-profile no-debug \
             --profile ci-core \
-            --features schemars \
+            --features ci,schemars \
             -E "${CI_CORE_FILTER}"
 
       - name: "Upload coverage reports to Codecov"
@@ -467,12 +467,12 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-llvm-cov
 
@@ -501,7 +501,7 @@ jobs:
             --output-path lcov.info `
             --workspace `
             --cargo-profile no-debug `
-            --features schemars `
+            --features ci,schemars `
             --profile ci-core `
             -E $env:CI_CORE_FILTER
 
@@ -541,14 +541,20 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: "Install cargo nextest"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest
 
       - name: "Install cargo-llvm-cov"
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-llvm-cov
+
+      - name: "Install cargo-binstall"
+        if: ${{ contains(format(' {0} ', matrix.languages), ' rust ') }}
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: cargo-binstall
 
       # LuaRocks may compile native Lua modules, such as luafilesystem, on Windows.
       - name: "Setup MSVC"
@@ -635,6 +641,14 @@ jobs:
           init-shell: none
           generate-run-shell: false
 
+      - name: "Install Pixi"
+        if: ${{ contains(format(' {0} ', matrix.languages), ' conda ') }}
+        uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.78.0
+          run-install: false
+          cache: false
+
       - name: "Install Coursier"
         if: ${{ contains(format(' {0} ', matrix.languages), ' coursier ') }}
         uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
@@ -692,14 +706,14 @@ jobs:
           # token, shared runners quickly hit the 60 req/hour rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXTEST_FILTER: ${{ matrix.filter }}
-          PRE_COMMIT_USE_MICROMAMBA: "true"
+          PREK_CONDA_INSTALLER: micromamba
         run: |
           cargo llvm-cov nextest \
             --lcov \
             --output-path lcov.info \
             --workspace \
             --cargo-profile no-debug \
-            --features schemars \
+            --features ci,schemars \
             --profile ci-language \
             -E "$NEXTEST_FILTER"
 
@@ -709,7 +723,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXTEST_FILTER: ${{ matrix.filter }}
-          PRE_COMMIT_USE_MICROMAMBA: "true"
+          PREK_CONDA_INSTALLER: micromamba
         run: |
           # Remove msys64 from PATH for Rust compilation
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\msys64\\' }) -join ';'
@@ -719,7 +733,7 @@ jobs:
             --output-path lcov.info `
             --workspace `
             --cargo-profile no-debug `
-            --features schemars `
+            --features ci,schemars `
             --profile ci-language `
             -E $env:NEXTEST_FILTER
 
