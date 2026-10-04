@@ -142,6 +142,13 @@
       "description": "Set to true to have prek stop running hooks after the first failure.\nDefault is false.",
       "type": "boolean"
     },
+    "hide_status": {
+      "description": "Hide hook reports with these final statuses. An empty list shows all reports.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/HideStatus"
+      }
+    },
     "minimum_prek_version": {
       "description": "The minimum version of prek required to run this configuration.",
       "type": "string"
@@ -303,6 +310,10 @@
         "exclude": {
           "description": "Exclude files that were matched by `files`.\nDefault is `$^`, which matches nothing.",
           "$ref": "#/definitions/FilePattern"
+        },
+        "include_deleted": {
+          "description": "Include deleted paths when selecting staged changes or a commit range.\nDefault is false.",
+          "type": "boolean"
         },
         "types": {
           "description": "List of file types to run on (AND).\nDefault is `[file]`, which matches all files.",
@@ -614,6 +625,10 @@
           "description": "Exclude files that were matched by `files`.\nDefault is `$^`, which matches nothing.",
           "$ref": "#/definitions/FilePattern"
         },
+        "include_deleted": {
+          "description": "Include deleted paths when selecting staged changes or a commit range.\nDefault is false.",
+          "type": "boolean"
+        },
         "types": {
           "description": "List of file types to run on (AND).\nDefault is `[file]`, which matches all files.",
           "type": "array",
@@ -782,6 +797,10 @@
         "exclude": {
           "description": "Exclude files that were matched by `files`.\nDefault is `$^`, which matches nothing.",
           "$ref": "#/definitions/FilePattern"
+        },
+        "include_deleted": {
+          "description": "Include deleted paths when selecting staged changes or a commit range.\nDefault is false.",
+          "type": "boolean"
         },
         "types": {
           "description": "List of file types to run on (AND).\nDefault is `[file]`, which matches all files.",
@@ -957,6 +976,10 @@
           "description": "Exclude files that were matched by `files`.\nDefault is `$^`, which matches nothing.",
           "$ref": "#/definitions/FilePattern"
         },
+        "include_deleted": {
+          "description": "Include deleted paths when selecting staged changes or a commit range.\nDefault is false.",
+          "type": "boolean"
+        },
         "types": {
           "description": "List of file types to run on (AND).\nDefault is `[file]`, which matches all files.",
           "type": "array",
@@ -1064,6 +1087,7 @@
         "check-illegal-windows-names",
         "check-json",
         "check-json5",
+        "check-jsonc",
         "check-merge-conflict",
         "check-shebang-scripts-are-executable",
         "check-symlinks",
@@ -1101,6 +1125,14 @@
         "pre-push",
         "pre-rebase",
         "prepare-commit-msg"
+      ]
+    },
+    "HideStatus": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
       ]
     }
   }

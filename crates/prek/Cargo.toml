@@ -42,6 +42,7 @@ bstr = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+clap_complete_nushell = { workspace = true }
 console = { workspace = true }
 ctrlc = { workspace = true }
 dunce = { workspace = true }
@@ -57,6 +58,7 @@ indicatif = { workspace = true }
 indoc = { workspace = true }
 itertools = { workspace = true }
 json5 = { workspace = true }
+jsonc-parser = { workspace = true }
 globset = { workspace = true }
 granit-parser = { workspace = true }
 # Enable static linking for liblzma
@@ -66,7 +68,6 @@ asyncband = { workspace = true }
 memchr = { workspace = true }
 owo-colors = { workspace = true }
 regex = { workspace = true }
-regex-automata = { workspace = true }
 reqwest = { workspace = true }
 rayon = { workspace = true }
 aws-lc-rs = { workspace = true }
@@ -80,6 +81,7 @@ serde_json = { workspace = true }
 serde_stacker = { workspace = true }
 serde-saphyr = { workspace = true }
 shlex = { workspace = true }
+simdutf8 = { workspace = true }
 similar = { workspace = true }
 ssl-certs = { workspace = true }
 strum = { workspace = true }

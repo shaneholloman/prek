@@ -28,8 +28,8 @@ Great news - prek is designed as a drop-in replacement, you only need two tweaks
 From here you can explore what prek adds on top of pre-commit:
 
 - [Key differences and new features](./diff.md)
-- [Built-in Rust-native hooks](./builtin.md)
-- [Workspace mode for monorepos](./workspace.md)
+- [Built-in Rust-native hooks](built-in-hooks.md)
+- [Workspace mode for monorepos](monorepos.md)
 
 ## New to pre-commit-style workflows?
 
@@ -37,15 +37,19 @@ Follow this short example to experience how prek automates linting and formattin
 
 ### 1. Initialize the repository
 
-Run `prek init` from anywhere in your Git worktree:
+From the root of a Git repository without an existing hook configuration, run:
 
 ```bash
 prek init
 ```
 
-This creates a starter `prek.toml` at the Git worktree root and installs the
-`pre-commit` Git shim. If the root already has a supported configuration file,
-prek keeps it unchanged and installs the shim.
+This creates a starter `prek.toml` and installs the `pre-commit` Git shim so
+Git runs prek when you commit.
+
+!!! note
+
+    `prek.toml` is the native configuration file for **prek**. prek also supports
+    `.pre-commit-config.yaml`, so you can keep your existing configuration.
 
 The generated configuration uses prek's built-in hooks:
 
@@ -58,10 +62,6 @@ hooks = [
   { id = "check-added-large-files" },
 ]
 ```
-
-!!! note
-
-    `prek.toml` is the native configuration file for **prek**. If you already have a `.pre-commit-config.yaml`, prek can still read it today.
 
 Add a small YAML file so the first run has something to check, then stage both
 files:
@@ -90,8 +90,9 @@ fix end of files.........................................................Passed
 check for added large files..............................................Passed
 ```
 
-The first run can take longer because prek downloads the hook repository and
-prepares its environment.
+The built-in hooks in this example are ready to run immediately. Remote hooks
+can take longer on their first run while prek downloads their repository and
+prepares the environment.
 
 Need to run a single hook? Pass its ID, for example `prek run trailing-whitespace`. You can also target specific files with `--files`, or run against the entire repository with `--all-files`. Use `--all-files` after adding or changing a hook to check existing files that are not staged.
 
@@ -116,9 +117,14 @@ the shim later, or `prek uninstall` to remove it.
 
 ### 4. Go further
 
+For other setups, `prek init --format yaml` creates `.pre-commit-config.yaml`.
+Use `prek init --no-install` to create only the config, then run `prek install`
+when you are ready to enable checks on commit. To create a config in an existing
+subdirectory, see [Monorepos](monorepos.md#add-a-project-configuration).
+
 - Explore richer configuration options in the official [pre-commit documentation](https://pre-commit.com/). Every example there works with prek.
-- See [Common Workflows](./usage.md) for the commands you will use after setup and how to handle hook failures.
+- See [Running Hooks](running-hooks.md) for the commands you will use after setup and how to handle hook failures.
 - Check the [configuration reference](./reference/configuration.md) for prek-specific settings.
-- Browse the [built-in hooks](./builtin.md) and the [difference guide](./diff.md) to see what else you can leverage.
+- Browse the [built-in hooks](built-in-hooks.md) and the [difference guide](./diff.md) to see what else you can leverage.
 
 That’s it! You now have automated checks running locally with minimal setup. When you’re ready to dive deeper, the rest of the docs cover advanced workflows, language-specific installers, and more.

@@ -39,6 +39,23 @@ The following hook expects `uv` and the project's dependencies to be available.
 and any interpreters or package managers it invokes must already be available
 on `PATH`.
 
+## Choose a language
+
+For a project linter or formatter, start with `language = "system"` as in the
+example above. Other choices depend on how the command should be installed:
+
+| What the command needs | Language |
+| -- | -- |
+| A tool already installed by the project or CI image | [`system`](reference/language-support.md#system) |
+| A checked-in executable script | [`script`](reference/language-support.md#script) |
+| Dependencies installed in a hook environment | The ecosystem's language, such as `python` or `node` |
+| A packaged container runtime | [`docker`](reference/language-support.md#docker) or [`docker_image`](reference/language-support.md#docker_image) |
+
+The [Language Support reference](reference/language-support.md) lists supported
+languages, toolchain requirements, and installation behavior. For simple content
+or filename checks, a [built-in hook](reference/built-in-hooks.md) may already do
+what you need.
+
 ## Decide how the command receives files
 
 `pass_filenames` defaults to `true`. Matching filenames are appended after
@@ -71,21 +88,10 @@ prek-specific form.
 
 ## Filter when the hook runs
 
-Use file filters to avoid starting a command when no relevant file changed:
-
-- `types` and `types_or` use file type tags detected by prek.
-- `files` and `exclude` match paths with regular expressions, or with prek's
-  explicit glob form.
-- `stages` limits the Git hook stages where a hook is eligible.
-
-Inspect a file's detected tags with:
-
-```bash
-prek util identify path/to/file
-```
-
-The [configuration reference](reference/configuration.md#common-hook-options)
-documents how the filters combine.
+Local hooks use the same [file and stage filters](configuration.md#choose-which-files-and-stages-to-check)
+as remote hooks. In the Ruff example, `types = ["python"]` limits the command to
+Python files. In the Cargo example, `types = ["rust"]` controls whether the
+command runs, while `pass_filenames = false` lets Cargo select files itself.
 
 ## Commands do not use a shell by default
 
@@ -103,7 +109,7 @@ and Unix systems.
 
 A local hook runs in the directory of the project whose config defines it. In a
 single-config repository this is normally the Git root. In
-[workspace mode](workspace.md), a nested project's hooks run in that nested
+[workspace mode](monorepos.md), a nested project's hooks run in that nested
 project directory. Entries should therefore use paths relative to their own
 project rather than the directory from which the user invoked prek.
 

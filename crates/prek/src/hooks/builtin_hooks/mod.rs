@@ -9,7 +9,7 @@ use crate::cli::run::HookRunReporter;
 use crate::config::{BuiltinHook, FilePattern, HookOptions, PassFilenames, Stage};
 use crate::hook::Hook;
 use crate::hooks::pre_commit_hooks::{
-    check_added_large_files, check_case_conflict, check_executables_have_shebangs,
+    FixArgs, check_added_large_files, check_case_conflict, check_executables_have_shebangs,
     check_illegal_windows_names, check_json, check_merge_conflict,
     check_shebang_scripts_are_executable, check_symlinks, check_toml, check_vcs_permalinks,
     check_xml, check_yaml, destroyed_symlinks, detect_private_key, file_contents_sorter,
@@ -21,6 +21,7 @@ use crate::store::Store;
 use super::{HookFuture, HookOutput};
 
 mod check_json5;
+mod check_jsonc;
 mod pattern;
 
 #[derive(
@@ -44,6 +45,7 @@ pub(crate) enum BuiltinHooks {
     CheckIllegalWindowsNames,
     CheckJson,
     CheckJson5,
+    CheckJsonc,
     CheckMergeConflict,
     CheckShebangScriptsAreExecutable,
     CheckSymlinks,
@@ -72,6 +74,7 @@ impl BuiltinHooks {
     fn flags_command(self) -> Option<Command> {
         Some(match self {
             Self::CheckAddedLargeFiles => check_added_large_files::Args::command(),
+            Self::CheckJsonc => check_jsonc::Args::command(),
             Self::CheckMergeConflict => check_merge_conflict::Args::command(),
             Self::CheckVcsPermalinks => check_vcs_permalinks::Args::command(),
             Self::CheckYaml => check_yaml::Args::command(),
@@ -79,6 +82,9 @@ impl BuiltinHooks {
                 pattern::FilenameArgs::command()
             }
             Self::DenyPattern | Self::RequirePattern => pattern::Args::command(),
+            Self::EndOfFileFixer | Self::FixByteOrderMarker | Self::RequirementsTxtFixer => {
+                FixArgs::command()
+            }
             Self::FileContentsSorter => file_contents_sorter::Args::command(),
             Self::MixedLineEnding => mixed_line_ending::Args::command(),
             Self::NoCommitToBranch => no_commit_to_branch::Args::command(),
@@ -113,6 +119,7 @@ impl BuiltinHooks {
             }
             Self::CheckJson => Box::pin(check_json::run(hook, filenames)),
             Self::CheckJson5 => Box::pin(check_json5::check_json5(hook, filenames)),
+            Self::CheckJsonc => Box::pin(check_jsonc::check_jsonc(hook, filenames)),
             Self::CheckMergeConflict => Box::pin(check_merge_conflict::run(hook, filenames)),
             Self::CheckShebangScriptsAreExecutable => {
                 Box::pin(check_shebang_scripts_are_executable::run(hook, filenames))
@@ -233,6 +240,18 @@ impl BuiltinHook {
                 options: HookOptions {
                     description: Some("Checks JSON5 files for parseable syntax.".to_string()),
                     types: Some(tags::TAG_SET_JSON5),
+                    ..Default::default()
+                },
+            },
+            BuiltinHooks::CheckJsonc => BuiltinHook {
+                id: "check-jsonc".to_string(),
+                name: "check jsonc".to_string(),
+                entry: "check-jsonc".to_string(),
+                priority: None,
+                groups: None,
+                options: HookOptions {
+                    description: Some("Checks JSONC files for parseable syntax.".to_string()),
+                    types: Some(tags::TAG_SET_JSONC),
                     ..Default::default()
                 },
             },

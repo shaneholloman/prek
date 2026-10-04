@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anstream::{ColorChoice, StripStream, eprintln};
 use anyhow::{Context, Result};
@@ -152,6 +153,14 @@ fn setup_logging(level: Level, log_file: LogFile, store: &Store) -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<ExitStatus> {
+    // Shell startup must not initialize the cache or overwrite the log from the last run.
+    if let Some(Command::Util(UtilNamespace {
+        command: UtilCommand::GenerateShellCompletion(args),
+    })) = &cli.command
+    {
+        return cli::generate_shell_completion(args.shell);
+    }
+
     terminal::enable_ansi_colors();
 
     ColorChoice::write_global(cli.globals.color.into());
@@ -403,14 +412,8 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
             UtilCommand::YamlToToml(args) => {
                 cli::yaml_to_toml(args.input, args.output, args.force, printer)
             }
-            UtilCommand::GenerateShellCompletion(args) => {
-                let mut command = Cli::command();
-                let bin_name = command
-                    .get_bin_name()
-                    .unwrap_or_else(|| command.get_name())
-                    .to_owned();
-                clap_complete::generate(args.shell, &mut command, bin_name, &mut std::io::stdout());
-                Ok(ExitStatus::Success)
+            UtilCommand::GenerateShellCompletion(_) => {
+                unreachable!("handled before store initialization")
             }
         },
         #[cfg(feature = "self-update")]
@@ -456,18 +459,38 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
     }
 }
 
+fn exit_interrupted() -> ! {
+    static EXIT_LOCK: Mutex<()> = Mutex::new(());
+
+    // Hold the lock through process::exit so concurrent exits on macOS cannot
+    // terminate another thread's exit handlers while they flush coverage data.
+    let _exit = EXIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cleanup();
+
+    #[expect(
+        clippy::exit,
+        clippy::cast_possible_wrap,
+        reason = "Preserve the Windows NTSTATUS value when exiting after Ctrl-C"
+    )]
+    std::process::exit(if cfg!(windows) {
+        0xC000_013A_u32 as i32
+    } else {
+        130
+    });
+}
+
 fn main() -> ExitCode {
-    CompleteEnv::with_factory(Cli::command).complete();
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    CompleteEnv::with_factory(Cli::command)
+        .completer("prek")
+        .complete();
 
     ctrlc::set_handler(move || {
-        cleanup();
-
-        #[allow(clippy::exit, clippy::cast_possible_wrap)]
-        std::process::exit(if cfg!(windows) {
-            0xC000_013A_u32 as i32
-        } else {
-            130
-        });
+        INTERRUPTED.store(true, Ordering::Relaxed);
+        exit_interrupted();
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -489,6 +512,11 @@ fn main() -> ExitCode {
     // Report the profiler if the feature is enabled
     #[cfg(all(unix, feature = "profiler"))]
     profiler::finish_profiling(_profiler_guard);
+
+    // Normal completion must not hide an interrupt while the handler waits for restoration.
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        exit_interrupted();
+    }
 
     match result {
         Ok(code) => code.into(),

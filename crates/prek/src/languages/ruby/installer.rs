@@ -1,16 +1,19 @@
 use std::env::consts::EXE_EXTENSION;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use asyncband::once::OnceMap;
 use itertools::Itertools;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use reqwest::Url;
+use rustc_hash::FxBuildHasher;
 use serde::Deserialize;
 use target_lexicon::{Architecture, Environment, HOST, OperatingSystem, Triple};
 use tracing::{debug, trace, warn};
 
 use crate::archive;
-use crate::checksum::{Sha256Digest, digest_from_sha256sums};
+use crate::checksum::{digest_from_sha256sums, fetch_checksum_with};
 use crate::fs::LockedFile;
 use crate::http::{DownloadChecksumPolicy, REQWEST_CLIENT, download_artifact_with};
 use crate::languages::ruby::RubyRequest;
@@ -339,7 +342,17 @@ impl RubyInstaller {
             &filename,
             store,
             DownloadChecksumPolicy::from_env(&EnvVars),
-            async || Self::fetch_checksum(&checksum_url, &filename, is_github).await,
+            async || {
+                let Some(checksums) = fetch_checksum_with(&checksum_url, |req| {
+                    let req = req.header("Accept", "application/octet-stream");
+                    maybe_add_github_auth(req, is_github, &EnvVars)
+                })
+                .await?
+                else {
+                    return Ok(None);
+                };
+                digest_from_sha256sums(&checksums, &filename)
+            },
             |req| maybe_add_github_auth(req, is_github, &EnvVars),
         )
         .await
@@ -366,36 +379,9 @@ impl RubyInstaller {
             fs_err::tokio::remove_dir_all(&target).await?;
         }
 
-        fs_err::tokio::rename(&inner, &target).await?;
+        crate::fs::rename_with_retry(&inner, &target).await?;
 
         RubyResult::from_managed_dir(&target, version.clone())
-    }
-
-    async fn fetch_checksum(
-        checksum_url: &str,
-        filename: &str,
-        is_github: bool,
-    ) -> Result<Option<Sha256Digest>> {
-        let req = REQWEST_CLIENT
-            .get(checksum_url)
-            .header("Accept", "application/octet-stream");
-        let req = maybe_add_github_auth(req, is_github, &EnvVars);
-
-        let response = req.send().await.with_context(|| {
-            format!("Failed to fetch rv-ruby checksum file from {checksum_url}")
-        })?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        let checksums = response
-            .error_for_status()
-            .with_context(|| format!("Failed to fetch rv-ruby checksum file from {checksum_url}"))?
-            .text()
-            .await
-            .with_context(|| format!("Failed to read rv-ruby checksum file from {checksum_url}"))?;
-
-        digest_from_sha256sums(&checksums, filename)
     }
 
     /// Find Ruby in the system PATH
@@ -546,19 +532,24 @@ fn find_gem_for_ruby(ruby_path: &Path) -> Result<PathBuf> {
 
 /// Query the Ruby version.
 pub(crate) async fn query_ruby_version(ruby_path: &Path) -> Result<semver::Version> {
-    let script = "puts RUBY_VERSION";
-    let output = Cmd::new(ruby_path)
-        .arg("-e")
-        .arg(script)
-        .check(true)
-        .output()
-        .await?;
+    static VERSIONS: LazyLock<OnceMap<PathBuf, semver::Version, FxBuildHasher>> =
+        LazyLock::new(|| OnceMap::with_hasher(FxBuildHasher));
 
-    let version_str = str::from_utf8(&output.stdout)?.trim_ascii();
-    let version = semver::Version::parse(version_str)
-        .with_context(|| format!("Failed to parse Ruby version: {version_str}"))?;
+    let key = fs_err::canonicalize(ruby_path).unwrap_or_else(|_| ruby_path.to_path_buf());
+    VERSIONS
+        .try_compute(key, async || {
+            let output = Cmd::new(ruby_path)
+                .arg("-e")
+                .arg("puts RUBY_VERSION")
+                .check(true)
+                .output()
+                .await?;
 
-    Ok(version)
+            let version_str = str::from_utf8(&output.stdout)?.trim_ascii();
+            semver::Version::parse(version_str)
+                .with_context(|| format!("Failed to parse Ruby version: {version_str}"))
+        })
+        .await
 }
 
 #[cfg(test)]

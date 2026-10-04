@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.5.4
+
+Released on 2026-09-28.
+
+### Highlights
+
+#### Faster builtin hooks
+
+In our end-to-end benchmark, prek is about 38% faster than 0.5.3, with some builtin
+hooks up to 273% faster (`check-yaml`: 273%, `check-json`: 80%,
+`check-merge-conflict`: 71%).
+
+### Enhancements
+
+- Add `include_deleted` to allow hooks to include deleted files ([#2733](https://github.com/j178/prek/pull/2733))
+- Add `--check` and simplify `end-of-file-fixer` ([#2764](https://github.com/j178/prek/pull/2764))
+- Add `--check` to `file-contents-sorter` ([#2765](https://github.com/j178/prek/pull/2765))
+- Add `--check` to `requirements-txt-fixer` ([#2766](https://github.com/j178/prek/pull/2766))
+- Add `--check` to `trailing-whitespace` ([#2763](https://github.com/j178/prek/pull/2763))
+- Expose and document `prek util generate-shell-completion` ([#2727](https://github.com/j178/prek/pull/2727))
+- Support `hide_status` in project and user configuration ([#2760](https://github.com/j178/prek/pull/2760))
+- Support look-around regex in builtin pattern hooks ([#2732](https://github.com/j178/prek/pull/2732))
+
+### Performance
+
+- Cache the resolved Git executable on macOS ([#2726](https://github.com/j178/prek/pull/2726))
+- Combine and cache Git repository path queries ([#2724](https://github.com/j178/prek/pull/2724))
+- Optimize common builtin hook execution ([#2768](https://github.com/j178/prek/pull/2768))
+- Optimize scanning in `mixed-line-ending` and `trailing-whitespace` ([#2769](https://github.com/j178/prek/pull/2769))
+- Scan `check-merge-conflict` files in fixed-size blocks ([#2781](https://github.com/j178/prek/pull/2781))
+- Use SIMD UTF-8 validation in `check-json`, `check-toml`, and `check-yaml` ([#2770](https://github.com/j178/prek/pull/2770))
+
+### Bug fixes
+
+- Retry transient rename failures on Windows ([#2756](https://github.com/j178/prek/pull/2756))
+- Use PATH to resolve prek in completion scripts ([#2719](https://github.com/j178/prek/pull/2719))
+
+### Documentation
+
+- Clarify the flow and scope of usage guides ([#2710](https://github.com/j178/prek/pull/2710))
+- Reorganize usage guides and reference documentation ([#2709](https://github.com/j178/prek/pull/2709))
+
+### Other changes
+
+- Sync latest identify tags ([#2762](https://github.com/j178/prek/pull/2762))
+
+### Contributors
+
+- @github-actions
+- @j178
+
+## 0.5.3
+
+Released on 2026-09-13.
+
+### Enhancements
+
+- Add PEP 740 attestations for PyPI releases ([#2705](https://github.com/j178/prek/pull/2705))
+- Add a `check-jsonc` builtin hook ([#2682](https://github.com/j178/prek/pull/2682))
+- Allow disabling automatic uv installation ([#2702](https://github.com/j178/prek/pull/2702))
+
+### Bug fixes
+
+- Fix Julia additional dependency specifiers ([#2703](https://github.com/j178/prek/pull/2703))
+- Update `granit-parser` to fix YAML flow indentation ([#2707](https://github.com/j178/prek/pull/2707))
+
+### Contributors
+
+- @clbarnes
+- @j178
+- @tisonkun
+
 ## 0.5.2
 
 Released on 2026-09-03.
@@ -1557,7 +1629,7 @@ In this release, prek adds a new special repo type `repo: builtin` that lets you
 It basically gives you another way to use the existing built‑in fast path for pre‑commit‑hooks, but without needing to point to an external repo.
 Since prek doesn’t have to clone anything or set up a virtual environment, `repo: builtin` hooks work even in air‑gapped environments.
 
-For more details, see: https://prek.j178.dev/builtin/
+For more details, see: https://prek.j178.dev/built-in-hooks/
 
 ### Enhancements
 
@@ -1981,7 +2053,7 @@ This is a huge milestone release that introduces **Workspace Mode** — first‑
 It auto‑discovers nested projects, runs hooks in project scope, and provides flexible selectors to target specific projects and hooks.
 This makes `prek` a powerful tool for managing pre-commit hooks in complex repository structures.
 
-For more details, see [Workspace Mode](https://prek.j178.dev/workspace/). If you encounter any issues, please report them at [Issues](https://github.com/j178/prek/issues).
+For more details, see [Workspace Mode](https://prek.j178.dev/monorepos/). If you encounter any issues, please report them at [Issues](https://github.com/j178/prek/issues).
 
 **Note**: If you ran `prek install` in a repo before, you gonna need to run `prek install` again to replace the old git hook scripts for the workspace mode to work.
 
@@ -2090,7 +2162,7 @@ This is a huge milestone release that introduces **Workspace Mode** — first‑
 
 **Note**: If you ran `prek install` in a repo before, you gonna need to run `prek install` again to replace the old git hook scripts for the workspace mode to work.
 
-For more details, see [Workspace Mode](https://prek.j178.dev/workspace/). If you encounter any issues, please report them at [Issues](https://github.com/j178/prek/issues).
+For more details, see [Workspace Mode](https://prek.j178.dev/monorepos/). If you encounter any issues, please report them at [Issues](https://github.com/j178/prek/issues).
 
 Special thanks to @potiuk for all the help and feedback in designing and testing this feature!
 

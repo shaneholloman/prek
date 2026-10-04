@@ -4,18 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use asyncband::once::OnceMap;
 use itertools::Itertools;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+use rustc_hash::FxBuildHasher;
 use semver::Version;
 use target_lexicon::{Architecture, ArmArchitecture, Environment, HOST, OperatingSystem, Triple};
 use tracing::{debug, trace, warn};
 
 use super::{inherited_mise_vars, mise_ceiling};
 use crate::archive;
-use crate::checksum::{Sha256Digest, digest_from_sha256sums};
+use crate::checksum::{digest_from_sha256sums, fetch_checksum};
 use crate::fs::{LockedFile, is_executable};
 use crate::git;
-use crate::http::{REQWEST_CLIENT, download_artifact};
+use crate::http::download_artifact;
 use crate::languages::version::{
     SemverRequest, ToolchainPolicy, ToolchainSource, find_system_executables,
 };
@@ -52,42 +54,49 @@ impl MiseResult {
     }
 
     pub(crate) async fn from_executable(mise: PathBuf) -> Result<Self> {
-        let isolated = tempfile::tempdir()?;
-        let mut command = Cmd::new(&mise);
-        for key in inherited_mise_vars() {
-            command.env_remove(key);
-        }
-        // Even `mise --version` discovers miserc files, initializes backend state,
-        // runs migrations and cache pruning, then checks for updates. CI disables
-        // the update check; disposable roots keep the probe away from user state.
-        let output = command
-            .current_dir(isolated.path())
-            .env(EnvVars::CI, "1")
-            .env(EnvVars::MISE_DATA_DIR, isolated.path().join("data"))
-            .env(EnvVars::MISE_CACHE_DIR, isolated.path().join("cache"))
-            .env(EnvVars::MISE_CONFIG_DIR, isolated.path().join("config"))
-            .env(EnvVars::MISE_STATE_DIR, isolated.path().join("state"))
-            .env(
-                EnvVars::MISE_SYSTEM_CONFIG_DIR,
-                isolated.path().join("system-config"),
-            )
-            .env(
-                EnvVars::MISE_SYSTEM_DATA_DIR,
-                isolated.path().join("system-data"),
-            )
-            .env(EnvVars::MISE_CEILING_PATHS, mise_ceiling(isolated.path())?)
-            .env(EnvVars::MISE_NO_CONFIG, "1")
-            .arg("--version")
-            .check(true)
-            .output()
+        static CACHE: LazyLock<OnceMap<PathBuf, Version, FxBuildHasher>> =
+            LazyLock::new(|| OnceMap::with_hasher(FxBuildHasher));
+        let key = fs_err::canonicalize(&mise).unwrap_or_else(|_| mise.clone());
+        let version = CACHE
+            .try_compute(key, async || {
+                let isolated = tempfile::tempdir()?;
+                let mut command = Cmd::new(&mise);
+                for key in inherited_mise_vars() {
+                    command.env_remove(key);
+                }
+                // Even `mise --version` discovers miserc files, initializes backend state,
+                // runs migrations and cache pruning, then checks for updates. CI disables
+                // the update check; disposable roots keep the probe away from user state.
+                let output = command
+                    .current_dir(isolated.path())
+                    .env(EnvVars::CI, "1")
+                    .env(EnvVars::MISE_DATA_DIR, isolated.path().join("data"))
+                    .env(EnvVars::MISE_CACHE_DIR, isolated.path().join("cache"))
+                    .env(EnvVars::MISE_CONFIG_DIR, isolated.path().join("config"))
+                    .env(EnvVars::MISE_STATE_DIR, isolated.path().join("state"))
+                    .env(
+                        EnvVars::MISE_SYSTEM_CONFIG_DIR,
+                        isolated.path().join("system-config"),
+                    )
+                    .env(
+                        EnvVars::MISE_SYSTEM_DATA_DIR,
+                        isolated.path().join("system-data"),
+                    )
+                    .env(EnvVars::MISE_CEILING_PATHS, mise_ceiling(isolated.path())?)
+                    .env(EnvVars::MISE_NO_CONFIG, "1")
+                    .arg("--version")
+                    .check(true)
+                    .output()
+                    .await?;
+                let output = str::from_utf8(&output.stdout)?;
+                output
+                    .split_whitespace()
+                    .next()
+                    .context("Failed to parse mise version output")?
+                    .parse()
+                    .context("Failed to parse mise version")
+            })
             .await?;
-        let output = String::from_utf8_lossy(&output.stdout);
-        let version = output
-            .split_whitespace()
-            .next()
-            .context("Failed to parse mise version output")?
-            .parse()
-            .context("Failed to parse mise version")?;
 
         Ok(Self { mise, version })
     }
@@ -232,7 +241,10 @@ impl MiseInstaller {
         let checksum_url = format!("{base_url}/SHASUMS256.txt");
 
         let download = download_artifact(&url, &filename, store, async || {
-            Self::fetch_checksum(&checksum_url, &filename).await
+            let Some(checksums) = fetch_checksum(&checksum_url).await? else {
+                return Ok(None);
+            };
+            digest_from_sha256sums(&checksums, &filename)
         })
         .await
         .context("Failed to download mise")?;
@@ -251,7 +263,7 @@ impl MiseInstaller {
             let source = bin_dir(&extracted)
                 .join("mise")
                 .with_extension(EXE_EXTENSION);
-            fs_err::tokio::rename(&source, &target_binary).await?;
+            crate::fs::rename_with_retry(&source, &target_binary).await?;
         }
         crate::fs::make_executable(&target_binary)?;
 
@@ -259,22 +271,9 @@ impl MiseInstaller {
         if target.exists() {
             fs_err::tokio::remove_dir_all(&target).await?;
         }
-        fs_err::tokio::rename(install_dir.keep(), &target).await?;
+        crate::fs::rename_with_retry(install_dir.keep(), &target).await?;
 
         Ok(MiseResult::from_dir(&target, version.clone()))
-    }
-
-    async fn fetch_checksum(url: &str, filename: &str) -> Result<Option<Sha256Digest>> {
-        let checksums = REQWEST_CLIENT
-            .get(url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to fetch mise checksums from {url}"))?
-            .error_for_status()
-            .with_context(|| format!("Failed to fetch mise checksums from {url}"))?
-            .text()
-            .await?;
-        digest_from_sha256sums(&checksums, filename)
     }
 }
 

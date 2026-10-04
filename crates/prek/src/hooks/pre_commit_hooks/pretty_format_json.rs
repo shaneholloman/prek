@@ -11,8 +11,7 @@ use similar::TextDiff;
 
 use crate::hook::Hook;
 use crate::hooks::HookOutput;
-use crate::hooks::pre_commit_hooks::{parse_hook_args, run_file_checks};
-use crate::run::INTERNAL_CONCURRENCY;
+use crate::hooks::pre_commit_hooks::{parse_hook_args, run_blocking_file_checks};
 
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true)]
@@ -81,17 +80,17 @@ pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> 
     let args: Args = parse_hook_args(hook)?;
     let prepared = PreparedArgs::from(&args);
 
-    run_file_checks(
+    run_blocking_file_checks(
+        hook.project().relative_path(),
         &args.filenames,
         filenames,
-        *INTERNAL_CONCURRENCY,
-        |filename| check_file(hook.project().relative_path(), filename, &prepared),
+        move |file_path, display_path| check_file(file_path, display_path, &prepared),
     )
     .await
 }
 
-async fn check_file(file_base: &Path, filename: &Path, args: &PreparedArgs) -> Result<HookOutput> {
-    let original_content = fs_err::tokio::read_to_string(file_base.join(filename)).await?;
+fn check_file(file_path: &Path, display_path: &Path, args: &PreparedArgs) -> Result<HookOutput> {
+    let original_content = fs_err::read_to_string(file_path)?;
 
     match prettify_json(&original_content, args) {
         Ok(prettified_json) => {
@@ -104,20 +103,21 @@ async fn check_file(file_base: &Path, filename: &Path, args: &PreparedArgs) -> R
                 // Rust writes bytes exactly as provided. Preserve the file's
                 // existing newline style instead of forcing serde_json's LF.
                 let output = with_original_line_ending(&prettified_json, &original_content);
-                fs_err::tokio::write(file_base.join(filename), output.as_bytes()).await?;
-                let message = format!("Fixing file {}\n", filename.display());
+                fs_err::write(file_path, output.as_bytes())?;
+                let message = format!("Fixing file {}\n", display_path.display());
                 Ok(HookOutput::known(1, message.into_bytes(), true))
             } else {
                 let normalized_content = normalize_newlines(&original_content);
-                let diff = generate_diff(normalized_content.as_ref(), &prettified_json, filename);
-                let message = format!("{}: not pretty-formatted.\n{diff}", filename.display());
+                let diff =
+                    generate_diff(normalized_content.as_ref(), &prettified_json, display_path);
+                let message = format!("{}: not pretty-formatted.\n{diff}", display_path.display());
                 Ok(HookOutput::unchanged(1, message.into_bytes()))
             }
         }
         Err(err) => {
             let error_message = format!(
                 "{}: invalid JSON ({err}). Consider using the `check-json` hook.\n",
-                filename.display(),
+                display_path.display(),
             );
             Ok(HookOutput::unchanged(1, error_message.into_bytes()))
         }
@@ -444,13 +444,13 @@ fn reorder_keys(value: &mut Value, top_keys: &[String], sort_keys: bool) {
     }
 }
 
-fn generate_diff(original: &str, formatted: &str, filename: &Path) -> String {
+fn generate_diff(original: &str, formatted: &str, display_path: &Path) -> String {
     TextDiff::from_lines(original, formatted)
         .unified_diff()
         .context_radius(3)
         .header(
-            &filename.display().to_string(),
-            &filename.display().to_string(),
+            &display_path.display().to_string(),
+            &display_path.display().to_string(),
         )
         .to_string()
 }
@@ -521,7 +521,11 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(dir.path(), Path::new("empty.json"), &args).await?;
+        let result = check_file(
+            &dir.path().join("empty.json"),
+            Path::new("empty.json"),
+            &args,
+        )?;
 
         assert_eq!(result.exit_status, 1);
         let output = String::from_utf8(result.output)?;
@@ -545,7 +549,11 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(dir.path(), Path::new("invalid.json"), &args).await?;
+        let result = check_file(
+            &dir.path().join("invalid.json"),
+            Path::new("invalid.json"),
+            &args,
+        )?;
 
         assert_eq!(result.exit_status, 1);
         let output = String::from_utf8(result.output)?;
@@ -569,10 +577,10 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 0);
-        assert!(result.output.is_empty());
+        assert_eq!(result.output, b"");
 
         Ok(())
     }
@@ -590,10 +598,10 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 0);
-        assert!(result.output.is_empty());
+        assert_eq!(result.output, b"");
 
         Ok(())
     }
@@ -611,10 +619,10 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 0);
-        assert!(result.output.is_empty());
+        assert_eq!(result.output, b"");
 
         Ok(())
     }
@@ -630,7 +638,11 @@ mod tests {
             ordered_top_keys: vec![],
             sort_keys: true,
         };
-        let result = check_file(dir.path(), Path::new("non_pretty.json"), &args).await?;
+        let result = check_file(
+            &dir.path().join("non_pretty.json"),
+            Path::new("non_pretty.json"),
+            &args,
+        )?;
 
         assert_eq!(result.exit_status, 1);
         let output = String::from_utf8(result.output)?;
@@ -672,11 +684,11 @@ mod tests {
             sort_keys: false,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         // With sorting disabled, no changes needed
         assert_eq!(result.exit_status, 0);
-        assert!(result.output.is_empty());
+        assert_eq!(result.output, b"");
 
         Ok(())
     }
@@ -693,7 +705,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         let output_str = String::from_utf8_lossy(&result.output);
@@ -733,7 +745,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -758,7 +770,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -781,7 +793,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -805,7 +817,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -850,7 +862,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -873,7 +885,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -909,7 +921,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 0);
         let result = fs_err::tokio::read_to_string(&file_path).await?;
@@ -942,7 +954,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         assert!(String::from_utf8_lossy(&result.output).contains("Fixing file"));
@@ -1000,7 +1012,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         let result = fs_err::tokio::read_to_string(&file_path).await?;
@@ -1031,7 +1043,7 @@ mod tests {
             sort_keys: true,
         };
 
-        let result = check_file(Path::new(""), &file_path, &args).await?;
+        let result = check_file(&file_path, &file_path, &args)?;
 
         assert_eq!(result.exit_status, 1);
         let result = fs_err::tokio::read_to_string(&file_path).await?;

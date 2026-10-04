@@ -2,7 +2,7 @@
 
 prek provides multiple installation methods to suit different needs and environments.
 
-Git is required. Prebuilt releases are available for macOS, Linux, and Windows
+Prebuilt releases are available for macOS, Linux, and Windows
 across the architectures listed on the
 [GitHub Releases](https://github.com/j178/prek/releases) page.
 
@@ -119,27 +119,33 @@ If you added prek as a project dependency, run it through that package manager:
     uv run prek --version
     ```
 
-=== "uvx one-off"
-
-    ```bash
-    uvx prek --version
-    ```
-
 === "npm project dependency"
 
     ```bash
     npm exec -- prek --version
     ```
 
-The rest of this documentation uses the shorter `prek` form. Substitute
-`uv run prek`, `uvx prek`, or `npm exec -- prek` when you intentionally avoid a
-global installation.
+The rest of this documentation uses the shorter `prek` form. For a project
+dependency, substitute `uv run prek` or `npm exec -- prek`.
+
+## Run without installing
+
+To try prek in an isolated environment without adding it to your project, use
+`uvx`:
+
+```bash
+uvx prek --version
+```
+
+Use `uvx prek` in place of `prek` in subsequent commands.
 
 ## Updating
 
 --8<-- "README.md:self-update"
 
-For other installation methods, follow the same installation steps again.
+If you installed prek with a package manager, use its upgrade command. For
+example, use `uv tool upgrade prek` for a uv tool installation or
+`pip install --upgrade prek` for a pip installation.
 
 ## Shell Completion
 
@@ -147,33 +153,52 @@ For other installation methods, follow the same installation steps again.
 
     Run `echo $SHELL` to determine your shell.
 
-To enable shell autocompletion for prek commands, run one of the following:
+prek provides shell completion for commands and options. Bash, Zsh, Fish, PowerShell,
+and Elvish also support hook or project selectors.
+To generate and load the completion script when your shell starts, run one of the following:
 
 === "Bash"
 
     ```bash
-    echo 'eval "$(COMPLETE=bash prek)"' >> ~/.bashrc
+    echo 'eval "$(prek util generate-shell-completion bash)"' >> ~/.bashrc
     ```
 
 === "Zsh"
 
     ```bash
-    echo 'eval "$(COMPLETE=zsh prek)"' >> ~/.zshrc
+    echo 'eval "$(prek util generate-shell-completion zsh)"' >> ~/.zshrc
     ```
 
 === "Fish"
 
-    ```bash
-    echo 'COMPLETE=fish prek | source' >> ~/.config/fish/config.fish
+    ```fish
+    echo 'prek util generate-shell-completion fish | source' >> ~/.config/fish/config.fish
     ```
 
 === "PowerShell"
 
     ```powershell
-    Add-Content -Path $PROFILE -Value '$env:COMPLETE = "powershell"; prek | Out-String | Invoke-Expression; Remove-Item Env:\COMPLETE'
+    Add-Content -Path $PROFILE -Value 'prek util generate-shell-completion powershell | Out-String | Invoke-Expression'
+    ```
+
+=== "Nushell"
+
+    Save the completion script:
+
+    ```nu
+    prek util generate-shell-completion nushell | save --force ($nu.default-config-dir | path join 'prek-completions.nu')
+    ```
+
+    Add the following to your `config.nu`:
+
+    ```nu
+    source ($nu.default-config-dir | path join 'prek-completions.nu')
     ```
 
 Then restart your shell or source the config file.
+
+You can also save the generated script to a completion file. Regenerate it after
+upgrading prek so the script matches the installed version.
 
 ## Artifact Verification
 

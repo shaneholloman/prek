@@ -18,13 +18,13 @@
 ## Where to Start
 
 - New to `prek`: start with [Installation](installation.md), then follow the [Quickstart](quickstart.md).
-- Already set up: use [Common Workflows](usage.md) for day-to-day commands and handling hook failures.
+- Already set up: use [Running Hooks](running-hooks.md) for day-to-day commands and handling hook failures.
 - Replacing another hook tool: follow [Migrating from Other Hook Tools](migration.md).
 - Writing config: read [Configuration](configuration.md), then use the [Configuration Reference](reference/configuration.md) for exact keys.
 - Defining hooks directly in your project configuration: use [Local Hooks](local-hooks.md).
 - Adding repository checks to a pipeline: see [Continuous Integration](ci.md).
 - Looking for setup patterns: browse the [Cookbook](cookbook.md).
-- Working in a monorepo: see [Workspace Mode](workspace.md).
+- Working in a monorepo: see [Monorepos](monorepos.md).
 - Looking for flags or environment variables: use the [CLI Reference](reference/cli.md) and [Environment Variable Reference](reference/environment-variables.md).
 - Reviewing trust and pinning choices: read the [Security Guide](security.md).
 
@@ -34,26 +34,26 @@
 
 Show that your project uses prek with a badge in your README:
 
-[![prek](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json)](https://github.com/j178/prek)
+[![prek](https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge.svg)](https://github.com/j178/prek)
 
 === "Markdown"
 
     ```markdown
-    [![prek](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json)](https://github.com/j178/prek)
+    [![prek](https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge.svg)](https://github.com/j178/prek)
     ```
 
 === "HTML"
 
     ```html
     <a href="https://github.com/j178/prek">
-      <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json" alt="prek">
+      <img src="https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge.svg" alt="prek">
     </a>
     ```
 
 === "reStructuredText (RST)"
 
     ```rst
-    .. image:: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json
+    .. image:: https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge.svg
        :target: https://github.com/j178/prek
        :alt: prek
     ```

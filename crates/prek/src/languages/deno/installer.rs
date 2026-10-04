@@ -5,14 +5,16 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use asyncband::once::OnceMap;
 use itertools::Itertools;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
+use rustc_hash::FxBuildHasher;
 use serde::Deserialize;
 use target_lexicon::{Architecture, HOST, OperatingSystem};
 use tracing::{debug, trace, warn};
 
 use crate::archive;
-use crate::checksum::{Sha256Digest, digest_from_sha256sums};
+use crate::checksum::{Sha256Digest, digest_from_sha256sums, fetch_checksum};
 use crate::fs::LockedFile;
 use crate::http::{REQWEST_CLIENT, download_artifact};
 use crate::languages::deno::DenoRequest;
@@ -50,24 +52,30 @@ impl DenoResult {
     }
 
     pub(crate) async fn from_executable(deno: PathBuf) -> Result<Self> {
-        let output = Cmd::new(&deno)
-            .env(EnvVars::DENO_NO_UPDATE_CHECK, "1")
-            .arg("--version")
-            .check(true)
-            .output()
-            .await?;
-        // Output format: "deno 2.1.0 (release, x86_64-unknown-linux-gnu)\n..."
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let version_str = output_str
-            .lines()
-            .next()
-            .and_then(|line| line.strip_prefix("deno "))
-            .and_then(|rest| rest.split_whitespace().next())
-            .context("Failed to parse deno version output")?;
+        static VERSIONS: LazyLock<OnceMap<PathBuf, DenoVersion, FxBuildHasher>> =
+            LazyLock::new(|| OnceMap::with_hasher(FxBuildHasher));
 
-        let version = version_str
-            .parse()
-            .context("Failed to parse deno version")?;
+        let key = fs_err::canonicalize(&deno).unwrap_or_else(|_| deno.clone());
+        let version = VERSIONS
+            .try_compute(key, async || {
+                let output = Cmd::new(&deno)
+                    .env(EnvVars::DENO_NO_UPDATE_CHECK, "1")
+                    .arg("--version")
+                    .check(true)
+                    .output()
+                    .await?;
+                // Output format: "deno 2.1.0 (release, x86_64-unknown-linux-gnu)\n..."
+                let output_str = str::from_utf8(&output.stdout)?;
+                let version_str = output_str
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("deno "))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .context("Failed to parse deno version output")?;
+
+                version_str.parse().context("Failed to parse deno version")
+            })
+            .await?;
 
         Ok(Self { deno, version })
     }
@@ -216,7 +224,10 @@ impl DenoInstaller {
         let target = self.root.join(version.to_string());
 
         let download = download_artifact(&url, &filename, store, async || {
-            Self::fetch_checksum(&checksum_url, &filename).await
+            let Some(checksums) = fetch_checksum(&checksum_url).await? else {
+                return Ok(None);
+            };
+            digest_from_deno_checksum(&checksums, &filename)
         })
         .await
         .context("Failed to download deno")?;
@@ -226,24 +237,6 @@ impl DenoInstaller {
         Self::install_extracted(&target, &extracted).await?;
 
         Ok(DenoResult::from_dir(&target, version.clone()))
-    }
-
-    async fn fetch_checksum(checksum_url: &str, filename: &str) -> Result<Option<Sha256Digest>> {
-        let response = REQWEST_CLIENT
-            .get(checksum_url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to fetch Deno checksum from {checksum_url}"))?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        let checksums = response
-            .error_for_status()
-            .with_context(|| format!("Failed to fetch Deno checksum from {checksum_url}"))?
-            .text()
-            .await?;
-        digest_from_deno_checksum(&checksums, filename)
     }
 
     async fn install_extracted(target: &Path, extracted: &Path) -> Result<()> {
@@ -266,7 +259,7 @@ impl DenoInstaller {
 
         let target_binary = target_bin_dir.join("deno").with_extension(EXE_EXTENSION);
         debug!(?extracted_binary, target = %target_binary.display(), "Moving deno to target");
-        fs_err::tokio::rename(&extracted_binary, &target_binary).await?;
+        crate::fs::rename_with_retry(&extracted_binary, &target_binary).await?;
 
         #[cfg(unix)]
         {

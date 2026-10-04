@@ -11,6 +11,19 @@ This page documents the configuration keys that `prek` understands.
 
 This file stores user-level `prek` settings and does not define project hooks.
 
+### Global `hide_status`
+
+Default hook report filtering for `prek run`, installed Git hooks, and `prek try-repo`:
+
+```toml
+hide_status = ["passed", "skipped"]
+```
+
+The default is an empty list, which shows all reports. CLI options override project
+[`hide_status`](#hide_status), which overrides this user-level default. Each source
+replaces the entire list. Set `hide_status = []` in a project to show all reports,
+or use `--no-hide-status` for a single run.
+
 ### Global `update`
 
 User-level defaults for [`prek update`](cli.md#prek-update):
@@ -247,6 +260,31 @@ Stop the run after the first failing hook.
 
 This is a global default; individual hooks can also set `fail_fast`.
 
+### `hide_status`
+
+!!! note "prek-only"
+
+    Hook report filtering is a prek extension.
+
+Hide hook reports with the specified final statuses, including their output.
+
+- Type: list of `"passed"`, `"failed"`, or `"skipped"`
+- Default: the [user-level setting](#global-hide_status), or an empty list
+
+```toml
+hide_status = ["passed", "skipped"]
+```
+
+```yaml
+hide_status: [passed, skipped]
+```
+
+`--hide-status` replaces the configured list. Use `hide_status = []` or
+`--no-hide-status` to show all reports.
+
+In workspace mode, this setting applies only to the current project.
+Filtering does not change hook execution or exit codes.
+
 ### `default_language_version`
 
 Map a language name to the default [`language_version`](#language_version) used by hooks of that language. Each value can be a request string or an options map.
@@ -475,7 +513,7 @@ Example:
           - id: ruff
     ```
 
-See [Workspace Mode - File Processing Behavior](../workspace.md#file-processing-behavior) for details.
+See [Orphan projects](workspace.md#orphan-projects) for details.
 
 ## Repo entries
 
@@ -661,7 +699,8 @@ Example:
           - id: check-yaml
     ```
 
-For the list of available built-in hooks and the “automatic fast path” behavior, see [Built-in Fast Hooks](../builtin.md).
+For available hooks and their arguments, see [Built-in Hooks](built-in-hooks.md). For setup
+examples and automatic fast-path behavior, see [Built-in Hooks](../built-in-hooks.md).
 
 ## Hook entries
 
@@ -848,7 +887,7 @@ How `prek` should run the hook (and whether it should create a managed environme
 
 Common values include `system`, `python`, `node`, `php`, `rust`, `golang`, `ruby`, and `docker`.
 
-See [Language Support](../languages.md) for per-language behavior, supported values, and [`language_version`](#language_version) details.
+See [Language Support](language-support.md) for per-language behavior, supported values, and [`language_version`](#language_version) details.
 
 !!! note "Language name aliases"
 
@@ -1091,6 +1130,74 @@ If you need to match a path pattern that doesn’t align with a hook’s default
             types: [file]
             files: \.(yaml|yml|myext)$
     ```
+
+### `include_deleted`
+
+!!! note "prek-only"
+
+    `include_deleted` is a `prek` extension.
+
+Include deleted paths when running hooks on staged changes or a commit range.
+
+- Type: boolean
+- Default: `false`
+
+Deleted paths pass through the same global and hook-level `files` / `exclude`
+filters as existing files.
+
+!!! note "Type tags for deleted files"
+
+    Type tags are inferred from the filename and Git's recorded file mode.
+    For example, a deleted regular `.rs` file still matches `types: [rust]`,
+    and a deleted symbolic link matches `types: [symlink]`.
+
+    Tags that require reading the deleted file, such as a language identified
+    only by its shebang, are unavailable. Unavailable tags neither satisfy
+    `types` / `types_or` nor match `exclude_types`.
+
+This is useful for project-wide checks that can fail after a file is deleted:
+
+=== "prek.toml"
+
+    ```toml
+    [[repos]]
+    repo = "local"
+    hooks = [
+      {
+        id = "cargo-clippy",
+        name = "cargo clippy",
+        language = "system",
+        entry = "cargo clippy --all-targets --all-features -- -D warnings",
+        types = ["rust"],
+        include_deleted = true,
+        pass_filenames = false,
+      },
+    ]
+    ```
+
+=== ".pre-commit-config.yaml"
+
+    ```yaml
+    repos:
+      - repo: local
+        hooks:
+          - id: cargo-clippy
+            name: cargo clippy
+            language: system
+            entry: cargo clippy --all-targets --all-features -- -D warnings
+            types: [rust]
+            include_deleted: true
+            pass_filenames: false
+    ```
+
+When [`pass_filenames`](#pass_filenames) is enabled, matching deleted paths are
+also passed to the hook. The hook must be able to handle paths that no longer
+exist. Renames include the old path as a deletion as well as the new path.
+
+`--all-files`, `--files`, `--directory`, and `--glob` retain their usual file
+selection and do not add deleted paths. Stages without file input, such as
+`post-merge`, still require [`always_run: true`](#always_run).
+Deleted-file matching during merge conflict resolution is not yet supported.
 
 ### `always_run`
 

@@ -32,7 +32,7 @@ git commit
 ```
 
 The next run checks the newly staged content. See
-[When a hook modifies files](usage.md#when-a-hook-modifies-files).
+[When a hook modifies files](running-hooks.md#when-a-hook-modifies-files).
 
 ## Why must a changed config be staged?
 
@@ -99,8 +99,8 @@ authentication often works automatically with no extra configuration:
 # GitHub CLI users: configure git to use gh for credentials
 gh auth setup-git
 
-# Now HTTPS URLs work automatically
-prek install
+# Download configured hook repositories and prepare their environments
+prek prepare-hooks
 ```
 
 Other credential helpers that work out of the box:

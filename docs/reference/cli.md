@@ -292,7 +292,7 @@ prek run [OPTIONS] [HOOK|PROJECT]...
 <p>Can be specified multiple times; a hook may match any specified group. When combined with <code>--require-group</code>, both filters must match. <code>@ungrouped</code> matches hooks without groups.</p>
 </dd><dt id="prek-run--help"><a href="#prek-run--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
 </dd><dt id="prek-run--hide-status"><a href="#prek-run--hide-status"><code>--hide-status</code></a> <i>status</i></dt><dd><p>Hide hook reports with the specified final status.</p>
-<p>Can be specified multiple times or as a comma-separated list. This does not change hook execution or exit codes.</p>
+<p>Can be specified multiple times or as a comma-separated list. This does not change hook execution or exit codes. Overrides <code>hide_status</code> in project and user configuration.</p>
 <p>Possible values:</p>
 <ul>
 <li><code>passed</code></li>
@@ -302,6 +302,7 @@ prek run [OPTIONS] [HOOK|PROJECT]...
 </dd><dt id="prek-run--log-file"><a href="#prek-run--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
 </dd><dt id="prek-run--no-group"><a href="#prek-run--no-group"><code>--no-group</code></a> <i>group</i></dt><dd><p>Do not run hooks belonging to the specified group.</p>
 <p>Can be specified multiple times. Exclusion wins over inclusion. The special selector <code>@ungrouped</code> is also supported.</p>
+</dd><dt id="prek-run--no-hide-status"><a href="#prek-run--no-hide-status"><code>--no-hide-status</code></a></dt><dd><p>Show all hook reports, overriding <code>hide_status</code> in configuration</p>
 </dd><dt id="prek-run--no-progress"><a href="#prek-run--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>
 <p>For example, spinners or progress bars.</p>
 </dd><dt id="prek-run--quiet"><a href="#prek-run--quiet"><code>--quiet</code></a>, <code>-q</code></dt><dd><p>Use quiet output.</p>
@@ -347,7 +348,13 @@ prek run [OPTIONS] [HOOK|PROJECT]...
 
 ## prek exec
 
-Run a command in the environment prepared for a configured hook
+Run a command in the environment prepared for a configured hook.
+
+The selector must resolve to exactly one hook. Its environment is prepared first if necessary, including its toolchain, dependencies, and environment variables.
+
+Everything after `--` replaces the hook's configured `entry` and `args`. This command does not select files, schedule other hooks, or stash changes. The child process runs in the current working directory after `--cd`, inherits standard input, output, and error, and returns its exit status.
+
+The `docker`, `docker_image`, `fail`, `julia`, and `pygrep` languages are unsupported. Builtin and meta hooks are also unsupported.
 
 <h3 class="cli-reference">Usage</h3>
 
@@ -873,7 +880,7 @@ prek try-repo [OPTIONS] <REPO> [HOOK|PROJECT]...
 <p>Patterns are matched against paths relative to the current working directory after applying <code>--cd</code>. Quote patterns to prevent shell expansion. This option can be repeated and combined with <code>--files</code> and <code>--directory</code>.</p>
 </dd><dt id="prek-try-repo--help"><a href="#prek-try-repo--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
 </dd><dt id="prek-try-repo--hide-status"><a href="#prek-try-repo--hide-status"><code>--hide-status</code></a> <i>status</i></dt><dd><p>Hide hook reports with the specified final status.</p>
-<p>Can be specified multiple times or as a comma-separated list. This does not change hook execution or exit codes.</p>
+<p>Can be specified multiple times or as a comma-separated list. This does not change hook execution or exit codes. Overrides <code>hide_status</code> in project and user configuration.</p>
 <p>Possible values:</p>
 <ul>
 <li><code>passed</code></li>
@@ -881,6 +888,7 @@ prek try-repo [OPTIONS] <REPO> [HOOK|PROJECT]...
 <li><code>skipped</code></li>
 </ul></dd><dt id="prek-try-repo--last-commit"><a href="#prek-try-repo--last-commit"><code>--last-commit</code></a></dt><dd><p>Run hooks against the last commit. Equivalent to <code>--from-ref HEAD~1 --to-ref HEAD</code></p>
 </dd><dt id="prek-try-repo--log-file"><a href="#prek-try-repo--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
+</dd><dt id="prek-try-repo--no-hide-status"><a href="#prek-try-repo--no-hide-status"><code>--no-hide-status</code></a></dt><dd><p>Show all hook reports, overriding <code>hide_status</code> in configuration</p>
 </dd><dt id="prek-try-repo--no-progress"><a href="#prek-try-repo--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>
 <p>For example, spinners or progress bars.</p>
 </dd><dt id="prek-try-repo--quiet"><a href="#prek-try-repo--quiet"><code>--quiet</code></a>, <code>-q</code></dt><dd><p>Use quiet output.</p>
@@ -938,6 +946,7 @@ prek util [OPTIONS] <COMMAND>
 <dt><a href="#prek-util-list-builtins"><code>prek util list-builtins</code></a></dt><dd><p>List all built-in hooks bundled with prek</p></dd>
 <dt><a href="#prek-util-init-template-dir"><code>prek util init-template-dir</code></a></dt><dd><p>Install Git shims in a directory intended for use with <code>git config init.templateDir</code></p></dd>
 <dt><a href="#prek-util-yaml-to-toml"><code>prek util yaml-to-toml</code></a></dt><dd><p>Convert a YAML configuration file to prek.toml</p></dd>
+<dt><a href="#prek-util-generate-shell-completion"><code>prek util generate-shell-completion</code></a></dt><dd><p>Generate shell completion scripts</p></dd>
 </dl>
 
 ### prek util identify
@@ -1105,6 +1114,44 @@ prek util yaml-to-toml [OPTIONS] [CONFIG]
 <p>May also be set with the <code>PREK_QUIET</code> environment variable.</p></dd><dt id="prek-util-yaml-to-toml--refresh"><a href="#prek-util-yaml-to-toml--refresh"><code>--refresh</code></a></dt><dd><p>Refresh all cached data</p>
 </dd><dt id="prek-util-yaml-to-toml--verbose"><a href="#prek-util-yaml-to-toml--verbose"><code>--verbose</code></a>, <code>-v</code></dt><dd><p>Use verbose output</p>
 </dd><dt id="prek-util-yaml-to-toml--version"><a href="#prek-util-yaml-to-toml--version"><code>--version</code></a>, <code>-V</code></dt><dd><p>Display the prek version</p>
+</dd></dl>
+
+### prek util generate-shell-completion
+
+Generate shell completion scripts.
+
+Load the generated script in your shell configuration to enable completion.
+
+<h3 class="cli-reference">Usage</h3>
+
+```
+prek util generate-shell-completion [OPTIONS] <SHELL>
+```
+
+<h3 class="cli-reference">Arguments</h3>
+
+<dl class="cli-reference"><dt id="prek-util-generate-shell-completion--shell"><a href="#prek-util-generate-shell-completion--shell"><code>SHELL</code></a></dt><dd><p>The shell to generate the completion script for</p>
+</dd></dl>
+
+<h3 class="cli-reference">Options</h3>
+
+<dl class="cli-reference"><dt id="prek-util-generate-shell-completion--cd"><a href="#prek-util-generate-shell-completion--cd"><code>--cd</code></a>, <code>-C</code> <i>dir</i></dt><dd><p>Change to directory before running</p>
+</dd><dt id="prek-util-generate-shell-completion--color"><a href="#prek-util-generate-shell-completion--color"><code>--color</code></a> <i>color</i></dt><dd><p>Whether to use color in output</p>
+<p>May also be set with the <code>PREK_COLOR</code> environment variable.</p><p>[default: auto]</p><p>Possible values:</p>
+<ul>
+<li><code>auto</code>:  Enables colored output only when the output is going to a terminal or TTY with support</li>
+<li><code>always</code>:  Enables colored output regardless of the detected environment</li>
+<li><code>never</code>:  Disables colored output</li>
+</ul></dd><dt id="prek-util-generate-shell-completion--config"><a href="#prek-util-generate-shell-completion--config"><code>--config</code></a>, <code>-c</code> <i>config</i></dt><dd><p>Path to alternate config file</p>
+</dd><dt id="prek-util-generate-shell-completion--help"><a href="#prek-util-generate-shell-completion--help"><code>--help</code></a>, <code>-h</code></dt><dd><p>Display the concise help for this command</p>
+</dd><dt id="prek-util-generate-shell-completion--log-file"><a href="#prek-util-generate-shell-completion--log-file"><code>--log-file</code></a> <i>log-file</i></dt><dd><p>Write trace logs to the specified file. If not specified, trace logs will be written to <code>$PREK_HOME/prek.log</code></p>
+</dd><dt id="prek-util-generate-shell-completion--no-progress"><a href="#prek-util-generate-shell-completion--no-progress"><code>--no-progress</code></a></dt><dd><p>Hide all progress outputs.</p>
+<p>For example, spinners or progress bars.</p>
+</dd><dt id="prek-util-generate-shell-completion--quiet"><a href="#prek-util-generate-shell-completion--quiet"><code>--quiet</code></a>, <code>-q</code></dt><dd><p>Use quiet output.</p>
+<p>Repeating this option, e.g., <code>-qq</code>, will enable a silent mode in which prek will write no output to stdout.</p>
+<p>May also be set with the <code>PREK_QUIET</code> environment variable.</p></dd><dt id="prek-util-generate-shell-completion--refresh"><a href="#prek-util-generate-shell-completion--refresh"><code>--refresh</code></a></dt><dd><p>Refresh all cached data</p>
+</dd><dt id="prek-util-generate-shell-completion--verbose"><a href="#prek-util-generate-shell-completion--verbose"><code>--verbose</code></a>, <code>-v</code></dt><dd><p>Use verbose output</p>
+</dd><dt id="prek-util-generate-shell-completion--version"><a href="#prek-util-generate-shell-completion--version"><code>--version</code></a>, <code>-V</code></dt><dd><p>Display the prek version</p>
 </dd></dl>
 
 ## prek self

@@ -13,17 +13,15 @@ use tracing::{debug, trace, warn};
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 
 use crate::archive;
-use crate::checksum::{Sha256Digest, digest_from_sha256sums};
+use crate::checksum::{digest_from_sha256sums, fetch_checksum};
 use crate::fs::LockedFile;
-use crate::http::{
-    DownloadChecksumPolicy, REQWEST_CLIENT, TempDownload, download_artifact, download_artifact_with,
-};
+use crate::http::{REQWEST_CLIENT, TempDownload, download_artifact};
 use crate::process::Cmd;
 use crate::store::{CacheBucket, Store};
 use crate::warn_user;
 
 // The version range of `uv` we will install. Should update periodically.
-const CUR_UV_VERSION: &str = "0.12.5";
+const CUR_UV_VERSION: &str = "0.12.17";
 static UV_VERSION_RANGE: LazyLock<VersionReq> =
     LazyLock::new(|| VersionReq::parse(">=0.7.0").unwrap());
 
@@ -126,7 +124,7 @@ fn get_uv_version(uv_path: &Path) -> Result<Version> {
         bail!("Failed to get uv version");
     }
 
-    let version_output = String::from_utf8_lossy(&output.stdout);
+    let version_output = str::from_utf8(&output.stdout)?;
     let version_str = version_output
         .split_whitespace()
         .nth(1)
@@ -192,7 +190,7 @@ async fn replace_uv_binary(source: &Path, target_path: &Path) -> Result<()> {
         fs_err::tokio::remove_file(target_path).await?;
     }
 
-    fs_err::tokio::rename(source, target_path).await?;
+    crate::fs::rename_with_retry(source, target_path).await?;
     Ok(())
 }
 
@@ -234,6 +232,13 @@ impl PyPiMirror {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+enum UvSource {
+    Auto,
+    None,
+    Explicit(InstallSource),
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum InstallSource {
     /// Download uv from Astral's CDN (the default).
     Astral,
@@ -266,28 +271,6 @@ impl InstallSource {
         trace!(version = %version, "Successfully installed uv");
 
         Ok(Uv::new(uv_path))
-    }
-
-    async fn fetch_release_archive_checksum(
-        checksum_url: &str,
-        archive_name: &str,
-    ) -> Result<Option<Sha256Digest>> {
-        let response = REQWEST_CLIENT
-            .get(checksum_url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to fetch uv checksum from {checksum_url}"))?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        let checksum = response
-            .error_for_status()
-            .with_context(|| format!("Failed to fetch uv checksum from {checksum_url}"))?
-            .text()
-            .await
-            .with_context(|| format!("Failed to read uv checksum from {checksum_url}"))?;
-        digest_from_sha256sums(&checksum, archive_name)
     }
 
     async fn install_from_release_archive(
@@ -340,7 +323,6 @@ impl InstallSource {
         let target_path = target.join("uv").with_extension(EXE_EXTENSION);
 
         debug!(source = ?downloaded.path(), target = %target_path.display(), "Moving uv to target");
-        // TODO: retry on Windows
         replace_uv_binary(downloaded.path(), &target_path).await?;
 
         Ok(())
@@ -358,7 +340,10 @@ impl InstallSource {
         let checksum_url = format!("{download_url}.sha256");
 
         let download = download_artifact(&download_url, &archive_name, store, async || {
-            Self::fetch_release_archive_checksum(&checksum_url, &archive_name).await
+            let Some(checksum) = fetch_checksum(&checksum_url).await? else {
+                return Ok(None);
+            };
+            digest_from_sha256sums(&checksum, &archive_name)
         })
         .await
         .context("Failed to download uv")?;
@@ -415,8 +400,9 @@ impl InstallSource {
         let download_url = wheel_file["url"]
             .as_str()
             .context("Missing download URL in PyPI response")?;
+        let digest = wheel_file["digests"]["sha256"].as_str();
 
-        self.install_from_wheel_url(store, target, &wheel_name, download_url)
+        self.install_from_wheel_url(store, target, &wheel_name, download_url, digest)
             .await
     }
 
@@ -461,6 +447,11 @@ impl InstallSource {
                 )
             })?;
 
+        let (download_path, digest) = match download_path.split_once('#') {
+            Some((path, fragment)) => (path, fragment.strip_prefix("sha256=")),
+            None => (download_path, None),
+        };
+
         // Resolve relative URLs
         let download_url = if download_path.starts_with("http") {
             download_path.to_string()
@@ -468,7 +459,7 @@ impl InstallSource {
             format!("{simple_url}{download_path}")
         };
 
-        self.install_from_wheel_url(store, target, &wheel_name, &download_url)
+        self.install_from_wheel_url(store, target, &wheel_name, &download_url, digest)
             .await
     }
 
@@ -478,15 +469,11 @@ impl InstallSource {
         target: &Path,
         filename: &str,
         download_url: &str,
+        expected_digest: Option<&str>,
     ) -> Result<()> {
-        let download = download_artifact_with(
-            download_url,
-            filename,
-            store,
-            DownloadChecksumPolicy::Disabled,
-            async || Ok(None),
-            |req| req,
-        )
+        let download = download_artifact(download_url, filename, store, async || {
+            expected_digest.map(str::parse).transpose()
+        })
         .await
         .context("Failed to download uv wheel")?;
         let extracted = archive::extract_archive(download.path())
@@ -640,6 +627,17 @@ impl Uv {
             }
         }
 
+        let source = match uv_source_from_env(&EnvVars) {
+            UvSource::Auto => None,
+            UvSource::None => bail!(
+                "No compatible uv found and automatic installation is disabled by {}=none. \
+                 Install uv ({}) and add it to PATH",
+                EnvVars::PREK_UV_SOURCE,
+                *UV_VERSION_RANGE,
+            ),
+            UvSource::Explicit(source) => Some(source),
+        };
+
         // Install new managed uv with proper locking
         fs_err::tokio::create_dir_all(&uv_dir).await?;
         let _lock = LockedFile::acquire(uv_dir.join(".lock"), "uv").await?;
@@ -656,7 +654,7 @@ impl Uv {
             }
         }
 
-        if let Some(source) = uv_source_from_env(&EnvVars) {
+        if let Some(source) = source {
             source.install(store, uv_dir).await
         } else {
             Self::install_with_fallbacks(store, uv_dir).await
@@ -664,25 +662,30 @@ impl Uv {
     }
 }
 
-fn uv_source_from_env(env_vars: &impl EnvVarsRead) -> Option<InstallSource> {
-    let var = env_vars.var(EnvVars::PREK_UV_SOURCE).ok()?;
+fn uv_source_from_env(env_vars: &impl EnvVarsRead) -> UvSource {
+    let Ok(var) = env_vars.var(EnvVars::PREK_UV_SOURCE) else {
+        return UvSource::Auto;
+    };
     match var.as_str() {
-        "astral" => Some(InstallSource::Astral),
-        "github" => Some(InstallSource::GitHub),
-        "pypi" => Some(InstallSource::PyPi(PyPiMirror::Pypi)),
-        "tuna" => Some(InstallSource::PyPi(PyPiMirror::Tuna)),
-        "aliyun" => Some(InstallSource::PyPi(PyPiMirror::Aliyun)),
-        "tencent" => Some(InstallSource::PyPi(PyPiMirror::Tencent)),
-        "pip" => Some(InstallSource::Pip),
-        custom if custom.starts_with("http") => Some(InstallSource::PyPi(PyPiMirror::Custom(var))),
+        "none" => UvSource::None,
+        "astral" => UvSource::Explicit(InstallSource::Astral),
+        "github" => UvSource::Explicit(InstallSource::GitHub),
+        "pypi" => UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Pypi)),
+        "tuna" => UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Tuna)),
+        "aliyun" => UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Aliyun)),
+        "tencent" => UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Tencent)),
+        "pip" => UvSource::Explicit(InstallSource::Pip),
+        custom if custom.starts_with("http") => {
+            UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Custom(var)))
+        }
         _ => {
             warn_user!(
-                "Invalid value for {}: {:?}. Expected astral, github, pypi, tuna, aliyun, tencent, pip, or an http(s) URL; using default ({:?})",
+                "Invalid value for {}: {:?}. Expected none, astral, github, pypi, tuna, aliyun, tencent, pip, or an http(s) URL; using default ({:?})",
                 EnvVars::PREK_UV_SOURCE,
                 var,
                 "auto",
             );
-            None
+            UvSource::Auto
         }
     }
 }
@@ -723,35 +726,39 @@ mod tests {
 
     #[test]
     fn uv_source_from_env_reads_source_override() {
-        assert_eq!(uv_source_from_env(&EnvVars::from_map(&[])), None);
+        assert_eq!(uv_source_from_env(&EnvVars::from_map(&[])), UvSource::Auto);
+        assert_eq!(
+            uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "none")])),
+            UvSource::None
+        );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "astral")])),
-            Some(InstallSource::Astral)
+            UvSource::Explicit(InstallSource::Astral)
         );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "github")])),
-            Some(InstallSource::GitHub)
+            UvSource::Explicit(InstallSource::GitHub)
         );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "pypi")])),
-            Some(InstallSource::PyPi(PyPiMirror::Pypi))
+            UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Pypi))
         );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "pip")])),
-            Some(InstallSource::Pip)
+            UvSource::Explicit(InstallSource::Pip)
         );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(
                 EnvVars::PREK_UV_SOURCE,
                 "https://example.com/simple",
             )])),
-            Some(InstallSource::PyPi(PyPiMirror::Custom(
+            UvSource::Explicit(InstallSource::PyPi(PyPiMirror::Custom(
                 "https://example.com/simple".to_string()
             )))
         );
         assert_eq!(
             uv_source_from_env(&EnvVars::from_map(&[(EnvVars::PREK_UV_SOURCE, "unknown")])),
-            None
+            UvSource::Auto
         );
     }
 

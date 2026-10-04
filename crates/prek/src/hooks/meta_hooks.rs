@@ -12,8 +12,8 @@ use crate::cli::run::{
     CollectOptions, FileTagCache, FileTagFilter, HookFileFilter, ProjectFiles, collect_run_input,
 };
 use crate::config::{FilePattern, HookOptions, Language, MetaHook};
-use crate::hook::Hook;
-use crate::hooks::HookOutput;
+use crate::hook::{Hook, Repo};
+use crate::hooks::{BuiltinHooks, HookOutput};
 use crate::store::Store;
 use crate::workspace::{HookInitFilters, Project};
 
@@ -134,7 +134,18 @@ pub(crate) async fn check_hooks_apply(
             .context("Failed to init hooks")?;
         let hooks = project_hooks
             .iter()
-            .filter(|hook| !hook.always_run && hook.language != Language::Fail)
+            .filter(|hook| {
+                if hook.always_run || hook.language == Language::Fail {
+                    return false;
+                }
+
+                // Builtins use `system`, but this hook only selects invalid filenames,
+                // so having no matches is expected, just like `language: fail`.
+                !matches!(
+                    hook.repo(),
+                    Repo::Builtin if hook.id == BuiltinHooks::CheckIllegalWindowsNames.as_ref()
+                )
+            })
             .collect::<Vec<_>>();
         if hooks.is_empty() {
             continue;
@@ -212,21 +223,6 @@ fn matches_patterns(
     true
 }
 
-// Returns true if the exclude pattern matches any files matching the include pattern.
-fn excludes_any(
-    files: &[impl AsRef<Path>],
-    include: Option<&FilePattern>,
-    exclude: Option<&FilePattern>,
-) -> bool {
-    if exclude.is_none() {
-        return true;
-    }
-
-    files
-        .iter()
-        .any(|f| matches_patterns(f.as_ref(), include, exclude))
-}
-
 /// Ensures that exclude directives apply to any file in the repository.
 pub(crate) async fn check_useless_excludes(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
     let projects = load_meta_projects(hook, filenames)?;
@@ -253,16 +249,13 @@ pub(crate) async fn check_useless_excludes(hook: &Hook, filenames: &[&Path]) -> 
 
     for project in projects {
         let config = project.config();
-        if !excludes_any(&input_project, None, config.exclude.as_ref()) {
+        if let Some(exclude) = &config.exclude
+            && !input_project.iter().any(|file| exclude.is_match(file))
+        {
             code = 1;
-            let display = config
-                .exclude
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
             writeln!(
                 &mut output,
-                "The global exclude pattern `{display}` does not match any files"
+                "The global exclude pattern `{exclude}` does not match any files"
             )?;
         }
 
@@ -349,31 +342,6 @@ pub fn identity(_hook: &Hook, filenames: &[&Path]) -> HookOutput {
 mod tests {
     use super::*;
     use prek_consts::{PRE_COMMIT_CONFIG_YAML, PRE_COMMIT_CONFIG_YML, PREK_TOML};
-
-    fn regex_pattern(pattern: &str) -> FilePattern {
-        FilePattern::regex(pattern).unwrap()
-    }
-
-    #[test]
-    fn test_excludes_any() {
-        let files = vec![
-            Path::new("file1.txt"),
-            Path::new("file2.txt"),
-            Path::new("file3.txt"),
-        ];
-        let include = regex_pattern(r"file.*");
-        let exclude = regex_pattern(r"file2\.txt");
-        assert!(excludes_any(&files, Some(&include), Some(&exclude)));
-
-        let include = regex_pattern(r"file.*");
-        let exclude = regex_pattern(r"file4\.txt");
-        assert!(!excludes_any(&files, Some(&include), Some(&exclude)));
-        assert!(excludes_any(&files, None, None));
-
-        let files = vec![Path::new("html/file1.html"), Path::new("html/file2.html")];
-        let exclude = regex_pattern(r"^html/");
-        assert!(excludes_any(&files, None, Some(&exclude)));
-    }
 
     #[test]
     fn meta_hook_patterns_cover_config_files() {

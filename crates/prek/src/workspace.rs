@@ -16,8 +16,7 @@ use tracing::{debug, error, instrument, trace};
 
 use crate::cli::run::{ConfiguredHook, GroupFilters, Selectors};
 use crate::config::{self, Config, read_config};
-use crate::fs::Simplified;
-use crate::git::GIT_ROOT;
+use crate::fs::{PathClean, Simplified};
 use crate::hook::HookSpec;
 use crate::hook::{self, Hook, Repo};
 use crate::store::{CacheBucket, Store};
@@ -292,10 +291,10 @@ impl Project {
 
     /// Discover a project from the give path or search from the given path to the git root.
     pub(crate) fn discover(config_file: Option<&Path>, dir: &Path) -> Result<Project, Error> {
-        let git_root = GIT_ROOT.as_ref().map_err(|e| Error::Git(e.into()))?;
+        let git_root = git::root().map_err(|e| Error::Git(e.into()))?;
 
         if let Some(config) = config_file {
-            return Project::from_config_file(config.into(), Some(git_root.clone()));
+            return Project::from_config_file(config.into(), Some(git_root.to_path_buf()));
         }
 
         let workspace_root = Workspace::find_root(None, dir)?;
@@ -621,11 +620,11 @@ impl Workspace {
     /// Find the workspace root.
     /// `dir` must be an absolute path.
     pub(crate) fn find_root(config_file: Option<&Path>, dir: &Path) -> Result<PathBuf, Error> {
-        let git_root = GIT_ROOT.as_ref().map_err(|e| Error::Git(e.into()))?;
+        let git_root = git::root().map_err(|e| Error::Git(e.into()))?;
 
         if config_file.is_some() {
             // For `--config <path>`, the workspace root is the git root.
-            return Ok(git_root.clone());
+            return Ok(git_root.to_path_buf());
         }
 
         // Walk from the given path up to the git root, to find the workspace root.
@@ -745,7 +744,7 @@ impl Workspace {
     fn discover_fresh(root: &Path, selectors: Option<&Selectors>) -> Result<Vec<Project>, Error> {
         let projects = Mutex::new(Ok(Vec::new()));
 
-        let git_root = GIT_ROOT.as_ref().map_err(|e| Error::Git(e.into()))?;
+        let git_root = git::root().map_err(|e| Error::Git(e.into()))?;
         let submodules = git::list_submodules(git_root).unwrap_or_else(|e| {
             error!("Failed to list git submodules: {e}");
             Vec::new()
@@ -901,32 +900,29 @@ impl Workspace {
     }
 
     /// Check if all configuration files are staged in git.
-    pub(crate) async fn check_configs_staged(&self) -> Result<()> {
-        let config_files = self.config_files().collect::<Vec<_>>();
-        let non_staged = git::files_not_staged(&config_files).await?;
-
-        let git_root = GIT_ROOT.as_ref()?;
-        if !non_staged.is_empty() {
-            let non_staged = non_staged
-                .into_iter()
-                .map(|p| git_root.join(p))
-                .collect::<Vec<_>>();
-            match non_staged.as_slice() {
-                [filename] => anyhow::bail!(
-                    "Configuration file `{}` is not staged. Stage it with `git add` and try again",
-                    filename.user_display().cyan()
-                ),
-                _ => anyhow::bail!(
-                    "The following configuration files are not staged. Stage them with `git add` and try again:\n{}",
-                    non_staged
-                        .iter()
-                        .map(|p| format!("  - `{}`", p.user_display()))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ),
-            }
+    pub(crate) fn check_configs_staged(&self, unstaged: &[PathBuf]) -> Result<()> {
+        let config_files = self
+            .config_files()
+            .map(Path::clean)
+            .collect::<FxHashSet<_>>();
+        let unstaged_configs = unstaged
+            .iter()
+            .filter(|path| config_files.contains(*path))
+            .collect::<Vec<_>>();
+        match unstaged_configs.as_slice() {
+            [] => Ok(()),
+            [filename] => anyhow::bail!(
+                "Configuration file `{}` is not staged. Stage it with `git add` and try again",
+                filename.user_display().cyan()
+            ),
+            filenames => anyhow::bail!(
+                "The following configuration files are not staged. Stage them with `git add` and try again:\n{}",
+                filenames
+                    .iter()
+                    .map(|p| format!("  - `{}`", p.user_display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
         }
-
-        Ok(())
     }
 }

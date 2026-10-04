@@ -31,6 +31,11 @@ fn list_builtins_defaults_to_verbose_output() {
     check-json5
       Checks JSON5 files for parseable syntax.
 
+    check-jsonc
+      Checks JSONC files for parseable syntax.
+      flags:
+            --allow-trailing-commas  Allow trailing commas in objects and arrays
+
     check-merge-conflict
       Checks for files that contain merge conflict strings.
       flags:
@@ -80,15 +85,20 @@ fn list_builtins_defaults_to_verbose_output() {
 
     end-of-file-fixer
       Ensures that a file is either empty, or ends with one newline.
+      flags:
+            --check  Report files that would change without modifying them
 
     file-contents-sorter
       Sorts the lines in specified files (defaults to alphabetical).
       flags:
+            --check        Report files that would change without modifying them
             --ignore-case  Sort lines case-insensitively
             --unique       Remove duplicate lines
 
     fix-byte-order-marker
       Removes UTF-8 byte order marker.
+      flags:
+            --check  Report files that would change without modifying them
 
     forbid-new-submodules
       Prevents the addition of new Git submodules.
@@ -127,10 +137,13 @@ fn list_builtins_defaults_to_verbose_output() {
 
     requirements-txt-fixer
       Sorts entries in requirements.txt.
+      flags:
+            --check  Report files that would change without modifying them
 
     trailing-whitespace
       Trims trailing whitespace.
       flags:
+            --check                         Report files that would change without modifying them
             --markdown-linebreak-ext <EXT>  Preserve Markdown hard line breaks for EXT (repeatable)
             --chars <CHARS>                 Trim only these characters
 
@@ -177,6 +190,11 @@ fn list_builtins_json() {
         "id": "check-json5",
         "name": "check json5",
         "description": "Checks JSON5 files for parseable syntax."
+      },
+      {
+        "id": "check-jsonc",
+        "name": "check jsonc",
+        "description": "Checks JSONC files for parseable syntax."
       },
       {
         "id": "check-merge-conflict",

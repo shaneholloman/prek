@@ -18,7 +18,7 @@ pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput, 
     ) {
         Cow::Owned(format!("{from_ref}...{to_ref}"))
     } else {
-        Cow::Borrowed("--staged")
+        Cow::Borrowed("--cached")
     };
 
     let stdout = git::git_cmd()?
@@ -99,7 +99,7 @@ mod tests {
 
         let new_submodules = super::collect_new_submodules(stdout);
 
-        assert!(new_submodules.is_empty());
+        assert_eq!(new_submodules, Vec::<&str>::new());
     }
 
     #[test]

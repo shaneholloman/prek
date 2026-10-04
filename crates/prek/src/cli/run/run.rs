@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::slice;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use asyncband::semaphore::Semaphore;
@@ -22,18 +22,18 @@ use crate::cli::reporter::{HookInitReporter, HookInstallReporter};
 use crate::cli::run::diff::DiffTracker;
 use crate::cli::run::filter::{RunInputMode, stage_uses_message_file_input};
 use crate::cli::run::install::{InstallCache, install_hooks};
-use crate::cli::run::keeper::WorkTreeKeeper;
+use crate::cli::run::stash::{RestoreOutcome, WorktreeStash};
 use crate::cli::run::{
     CollectOptions, FileSelection, FileTagCache, GroupFilters, HookFileFilter, HookRunReporter,
     ProjectFiles, RunFileIndex, RunInput, Selectors, collect_run_input, project_status_marker,
 };
 use crate::cli::{ExitStatus, RunArgs, RunExtraArgs, RunOptions, flag};
-use crate::config::{PassFilenames, Stage};
+use crate::config::{HideStatus, PassFilenames, Stage};
 use crate::fs::CWD;
-use crate::git::GIT_ROOT;
 use crate::hook::{Hook, InstalledHook};
 use crate::printer::Printer;
 use crate::run::HOOK_CONCURRENCY;
+use crate::settings::FilesystemOptions;
 use crate::store::Store;
 use crate::terminal::{USE_COLOR, sanitize_output};
 use crate::workspace::{HookInitFilters, Project, Workspace};
@@ -98,10 +98,18 @@ pub(crate) async fn run(
         no_fail_fast,
         dry_run,
         hide_status,
+        no_hide_status,
         extra: extra_args,
     } = options;
     let selection: FileSelection = file_selection.into();
     let fail_fast = flag(fail_fast, no_fail_fast);
+    let hide_status = if no_hide_status {
+        Some([].as_slice())
+    } else if hide_status.is_empty() {
+        None
+    } else {
+        Some(hide_status.as_slice())
+    };
 
     // Prevent recursive post-checkout hooks.
     if hook_stage == Some(Stage::PostCheckout)
@@ -110,17 +118,30 @@ pub(crate) async fn run(
         return Ok(ExitStatus::Success);
     }
 
-    // Ensure we are in a git repository.
-    LazyLock::force(&GIT_ROOT).as_ref()?;
-
-    let should_stash = selection.requires_clean_worktree();
-
-    // Check if we have unresolved merge conflict files and fail fast.
-    if should_stash && git::has_unmerged_paths().await? {
-        anyhow::bail!(
-            "Found unresolved merge conflicts. Resolve the conflicts, stage the files with `git add`, and try again"
+    let requires_clean_worktree = selection.requires_clean_worktree();
+    let worktree = if requires_clean_worktree {
+        // Status paths are repository-relative, so the worktree query can start
+        // before repository discovery finishes. Preserve discovery errors first.
+        let (root, status) = tokio::join!(
+            tokio::task::spawn_blocking(git::root),
+            git::worktree_status(&CWD),
         );
-    }
+        let root = root??;
+        let mut status = status?;
+        if status.unmerged {
+            anyhow::bail!(
+                "Found unresolved merge conflicts. Resolve the conflicts, stage the files with `git add`, and try again"
+            );
+        }
+        for path in status.unstaged.iter_mut().chain(&mut status.intent_to_add) {
+            *path = root.join(&*path);
+        }
+        Some(status)
+    } else {
+        git::root()?;
+        None
+    };
+    let filesystem = FilesystemOptions::user()?;
 
     let workspace_root = Workspace::find_root(config.as_deref(), &CWD)?;
     let selectors = Selectors::load(&includes, &skips, &workspace_root)?;
@@ -128,8 +149,8 @@ pub(crate) async fn run(
     let has_group_filters = group_filters.has_filters();
     let workspace = Workspace::discover(store, workspace_root, config, Some(&selectors), refresh)?;
 
-    if should_stash {
-        workspace.check_configs_staged().await?;
+    if let Some(status) = &worktree {
+        workspace.check_configs_staged(&status.unstaged)?;
     }
 
     let reporter = HookInitReporter::new(printer);
@@ -208,63 +229,106 @@ pub(crate) async fn run(
     );
 
     // Clear any unstaged changes from the git working directory.
-    let mut _guard = None;
-    if should_stash {
-        _guard = Some(
-            WorkTreeKeeper::clean(store, workspace.root())
-                .await
+    let stash = if let Some(status) = worktree
+        && status
+            .unstaged
+            .iter()
+            .any(|path| path.starts_with(workspace.root()))
+    {
+        Some(
+            WorktreeStash::save(store, workspace.root(), status.intent_to_add)
                 .context("Failed to clean work tree")?,
-        );
-    }
+        )
+    } else {
+        None
+    };
 
     let (from_ref, to_ref) = selection.refs();
     set_env_vars(from_ref, to_ref, &extra_args);
 
-    let input = collect_run_input(
-        workspace.root(),
-        CollectOptions {
-            input_mode,
+    // These hooks run even without matching files and never receive filenames,
+    // so discovery and tagging cannot affect execution. Keep explicit paths and
+    // diff refs on their normal collection path to preserve validation.
+    let input_mode = if input_mode == RunInputMode::Files
+        && matches!(
             selection,
-            commit_msg_filename: extra_args.commit_msg_filename,
-        },
-    )
-    .await
-    .context("Failed to collect files")?;
-
-    // Change to the workspace root directory.
-    std::env::set_current_dir(workspace.root()).with_context(|| {
-        format!(
-            "Failed to change directory to `{}`",
-            workspace.root().display()
+            FileSelection::Default | FileSelection::All { .. }
         )
-    })?;
+        && selected_hooks
+            .iter()
+            .filter_map(HookPlan::as_run)
+            .all(|hook| hook.always_run && hook.pass_filenames == PassFilenames::None)
+    {
+        RunInputMode::NoFiles
+    } else {
+        input_mode
+    };
 
-    let file_index = RunFileIndex::new(&input, workspace.all_projects());
-    let installed_hooks = ensure_hooks_installed(
-        store,
-        printer,
-        &workspace,
-        &input,
-        &file_index,
-        selected_hooks,
-    )
-    .await?;
+    let result = async {
+        let input = collect_run_input(
+            workspace.root(),
+            CollectOptions {
+                input_mode,
+                selection,
+                commit_msg_filename: extra_args.commit_msg_filename,
+                include_deleted: selected_hooks
+                    .iter()
+                    .filter_map(HookPlan::as_run)
+                    .any(|hook| hook.include_deleted),
+            },
+        )
+        .await
+        .context("Failed to collect files")?;
 
-    run_hooks(
-        &workspace,
-        &input,
-        &file_index,
-        &installed_hooks,
-        store,
-        show_diff_on_failure,
-        fail_fast,
-        dry_run,
-        &hide_status,
-        should_stash,
-        verbose,
-        printer,
-    )
-    .await
+        // Change to the workspace root directory.
+        std::env::set_current_dir(workspace.root()).with_context(|| {
+            format!(
+                "Failed to change directory to `{}`",
+                workspace.root().display()
+            )
+        })?;
+
+        let file_index = RunFileIndex::new(&input, workspace.all_projects());
+        let installed_hooks = ensure_hooks_installed(
+            store,
+            printer,
+            &workspace,
+            &input,
+            &file_index,
+            selected_hooks,
+        )
+        .await?;
+
+        run_hooks(
+            &workspace,
+            &input,
+            &file_index,
+            &installed_hooks,
+            store,
+            show_diff_on_failure,
+            fail_fast,
+            dry_run,
+            hide_status,
+            filesystem.as_ref(),
+            requires_clean_worktree,
+            verbose,
+            printer,
+        )
+        .await
+    }
+    .await;
+
+    let Some(stash) = stash else {
+        return result;
+    };
+    match (result, stash.restore()) {
+        (result, Ok(RestoreOutcome::Restored)) => result,
+        (result, Ok(RestoreOutcome::HookChangesReverted)) => result.map(|_| ExitStatus::Failure),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(restore_err)) => Err(anyhow::anyhow!(
+            "{err:#}\n\nWorktree restoration also failed:\n{restore_err:#}"
+        )),
+    }
 }
 
 fn infer_stage_and_input_mode(
@@ -367,14 +431,11 @@ async fn ensure_hooks_installed<'paths>(
     if !runnable_env_hooks.is_empty() {
         let _lock = store.lock_async().await?;
         let mut install_cache = InstallCache::new();
-        let mut missing_env_hooks = Vec::new();
-
-        for hook in runnable_env_hooks {
-            if let Some(installed_hook) = install_cache.installed_hook(store, hook.clone()).await {
-                installed_by_hook.insert(hook.key(), installed_hook);
-            } else {
-                missing_env_hooks.push(hook.clone());
-            }
+        let (installed_hooks, missing_env_hooks) = install_cache
+            .partition_installed_hooks(store, runnable_env_hooks)
+            .await;
+        for installed_hook in installed_hooks {
+            installed_by_hook.insert(installed_hook.key(), installed_hook);
         }
 
         if !missing_env_hooks.is_empty() {
@@ -469,7 +530,8 @@ async fn run_hooks<'paths>(
     show_diff_on_failure: bool,
     fail_fast: Option<bool>,
     dry_run: bool,
-    hide_status: &[HideStatus],
+    hide_status: Option<&[HideStatus]>,
+    filesystem: Option<&FilesystemOptions>,
     worktree_cleaned: bool,
     verbose: bool,
     printer: Printer,
@@ -493,7 +555,6 @@ async fn run_hooks<'paths>(
         hooks,
         store,
         dry_run,
-        hide_status,
         verbose,
         show_project_headers,
         printer,
@@ -514,6 +575,12 @@ async fn run_hooks<'paths>(
 
             project_runs.push(ProjectRun {
                 project,
+                report_filter: ReportFilter::new(
+                    hide_status
+                        .or(project.config().hide_status.as_deref())
+                        .or_else(|| filesystem.and_then(|fs| fs.hide_status.as_deref()))
+                        .unwrap_or_default(),
+                ),
                 project_fail_fast: fail_fast
                     .or_else(|| project.config().fail_fast)
                     .unwrap_or(false),
@@ -575,12 +642,14 @@ impl<'a> Iterator for ProjectDepthGroups<'a> {
 
 struct ProjectRun<'project> {
     project: &'project Project,
+    report_filter: ReportFilter<'project>,
     project_fail_fast: bool,
     groups: Vec<Vec<ScheduledHook>>,
 }
 
 struct ProjectRunResult<'project> {
     project: &'project Project,
+    report_filter: ReportFilter<'project>,
     groups: Vec<PriorityGroupResult>,
     stop_after_level: bool,
 }
@@ -590,10 +659,10 @@ impl ProjectRunResult<'_> {
         self.groups.iter().any(PriorityGroupResult::failed)
     }
 
-    fn has_visible_report(&self, filter: ReportFilter<'_>) -> bool {
+    fn has_visible_report(&self) -> bool {
         self.groups
             .iter()
-            .any(|group| group.has_visible_report(filter))
+            .any(|group| group.has_visible_report(self.report_filter))
     }
 }
 
@@ -693,7 +762,6 @@ struct HookRunSession<'a> {
     status_printer: StatusPrinter,
     printer: Printer,
     dry_run: bool,
-    report_filter: ReportFilter<'a>,
     verbose: bool,
     failed: bool,
     modified_files: bool,
@@ -704,7 +772,6 @@ impl<'a> HookRunSession<'a> {
         hooks: &[ScheduledHook],
         store: &'a Store,
         dry_run: bool,
-        hidden_statuses: &'a [HideStatus],
         verbose: bool,
         show_project_headers: bool,
         printer: Printer,
@@ -719,7 +786,6 @@ impl<'a> HookRunSession<'a> {
             status_printer,
             printer,
             dry_run,
-            report_filter: ReportFilter::new(hidden_statuses),
             verbose,
             failed: false,
             modified_files: false,
@@ -765,7 +831,7 @@ impl<'a> HookRunSession<'a> {
                     .run_project(project_run, input, file_index, clean_baseline, semaphore)
                     .await;
                 if let Ok(result) = &result {
-                    if result.has_visible_report(self.report_filter) {
+                    if result.has_visible_report() {
                         self.reporter.on_project_complete(project, result.failed());
                     } else {
                         self.reporter.hide_project(project);
@@ -843,7 +909,7 @@ impl<'a> HookRunSession<'a> {
             let group_modified_files = known_modified_files || diff_detected_modifications;
 
             let group = PriorityGroupResult::new(group_results, group_modified_files);
-            self.update_live_priority_group(&group);
+            self.update_live_priority_group(&group, project_run.report_filter);
             stop_after_level = group.should_stop_project(project_run.project_fail_fast);
             groups.push(group);
 
@@ -854,6 +920,7 @@ impl<'a> HookRunSession<'a> {
 
         Ok(ProjectRunResult {
             project: project_run.project,
+            report_filter: project_run.report_filter,
             groups,
             stop_after_level,
         })
@@ -888,11 +955,11 @@ impl<'a> HookRunSession<'a> {
         runs.try_collect().await
     }
 
-    fn update_live_priority_group(&self, group: &PriorityGroupResult) {
+    fn update_live_priority_group(&self, group: &PriorityGroupResult, filter: ReportFilter<'_>) {
         for result in &group.results {
             let status = result.status;
             match status {
-                RunStatus::Passed | RunStatus::Failed if self.report_filter.shows(status) => {
+                RunStatus::Passed | RunStatus::Failed if filter.shows(status) => {
                     self.reporter
                         .on_run_result(&result.hook, status == RunStatus::Passed);
                 }
@@ -909,8 +976,7 @@ impl<'a> HookRunSession<'a> {
         project_result: ProjectRunResult<'_>,
         show_project_headers: bool,
     ) -> Result<bool> {
-        let show_project_header =
-            show_project_headers && project_result.has_visible_report(self.report_filter);
+        let show_project_header = show_project_headers && project_result.has_visible_report();
         self.render_project_header(
             project_result.project,
             project_result.failed(),
@@ -919,7 +985,7 @@ impl<'a> HookRunSession<'a> {
         let hook_prefix = if show_project_header { "  " } else { "" };
 
         for group in project_result.groups {
-            self.finish_priority_group(group, hook_prefix)?;
+            self.finish_priority_group(group, hook_prefix, project_result.report_filter)?;
         }
 
         Ok(project_result.stop_after_level)
@@ -929,6 +995,7 @@ impl<'a> HookRunSession<'a> {
         &mut self,
         mut group: PriorityGroupResult,
         hook_prefix: &str,
+        filter: ReportFilter<'_>,
     ) -> Result<()> {
         // Print results in a stable order (same order as config within the project).
         group.results.sort_unstable_by_key(|result| result.hook.idx);
@@ -943,22 +1010,27 @@ impl<'a> HookRunSession<'a> {
             }
         }
         self.reporter
-            .suspend(|| self.render_priority_group(&group, hook_prefix))?;
+            .suspend(|| self.render_priority_group(&group, hook_prefix, filter))?;
 
         Ok(())
     }
 
-    fn render_priority_group(&self, group: &PriorityGroupResult, hook_prefix: &str) -> Result<()> {
+    fn render_priority_group(
+        &self,
+        group: &PriorityGroupResult,
+        hook_prefix: &str,
+        filter: ReportFilter<'_>,
+    ) -> Result<()> {
         let group_results = &group.results;
         let modifications_belong_to_single_hook =
             group.modification == Some(ModificationScope::SingleHook);
-        let show_group_failure = group.shows_group_failure(self.report_filter);
+        let show_group_failure = group.shows_group_failure(filter);
 
         // Hooks that did not run cannot have modified files, so report them outside
         // the modification group.
         let mut visible_results = group_results
             .iter()
-            .filter(|result| self.report_filter.shows(result.status))
+            .filter(|result| filter.shows(result.status))
             .filter(|result| !show_group_failure || result.status.was_executed())
             .peekable();
         let mut first_result = true;
@@ -1006,7 +1078,7 @@ impl<'a> HookRunSession<'a> {
 
         if show_group_failure {
             for result in group_results {
-                if !result.status.was_executed() && self.report_filter.shows(result.status) {
+                if !result.status.was_executed() && filter.shows(result.status) {
                     self.status_printer
                         .write(&result.hook.name, hook_prefix, result.status)?;
                 }
@@ -1136,6 +1208,7 @@ impl<'a> HookRunSession<'a> {
                 "--color=never"
             };
             git::git_cmd()?
+                .current_dir(workspace.root())
                 .arg("--no-pager")
                 .arg("diff")
                 .hidden_args(["--no-ext-diff"])
@@ -1309,13 +1382,6 @@ impl<'a> HookRunInput<'a> {
             rng.shuffle(filenames);
         }
     }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, clap::ValueEnum)]
-pub(crate) enum HideStatus {
-    Passed,
-    Failed,
-    Skipped,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
